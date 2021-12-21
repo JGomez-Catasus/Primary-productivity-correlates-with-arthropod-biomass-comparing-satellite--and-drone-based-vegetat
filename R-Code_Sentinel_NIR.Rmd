@@ -1,0 +1,3482 @@
+---
+title: "Sentinel - Índices de Vegetación estimados con NIR"
+date: "29/11/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+#### **OBJETIVO** En este documento evalúa el efecto de los índices de vegetación estimados a partir NIR en Sentinel en: A) la Biomasa de Epígeos; B) la Biomasa de Coleópteros; y C) la Biomasa de Hipógeos
+
+#### **CONCLUSIONES**   
+
+#### 1. Cargamos las librerias necesarias
+```{r message= FALSE, warning= FALSE}
+library(lattice)
+library(ggplot2)
+library(plyr)
+library(grid)
+library(fields)
+library(INLA)
+library(vegan)
+library(readxl)
+library(cowplot)
+library(Rcmdr)
+source("HighstatLibV10.R")
+```
+
+#### 2. Cargamos los datos y los preparamos:
+
+Datos:
+```{r}
+Data <- read_excel("Sentinel_NIR_RE_modfJulia_20210607.xlsx")
+```
+
+Valores sobre el número de estaciones de muestreos a aportar en Métodos.
+```{r}
+length(unique(Data$Estacion)) # Número de estaciones de muestreo diferentes
+
+unique(Data$Season[Data$Year == 2017]) # Periodos muestreados en 2017
+unique(Data$Month[Data$Year == 2017]) # Meses muestreados en 2017
+
+unique(Data$Season[Data$Year == 2018]) # Periodos muestreados en 2018
+unique(Data$Month[Data$Year == 2018]) # Meses muestreados en 2018
+
+unique(Data$Season[Data$Year == 2019]) # Periodos muestreados en 2019
+unique(Data$Month[Data$Year == 2019]) # Meses muestreados en 2019
+```  
+
+Si quitamos las estaciones en zonas que no son estepas naturales:
+```{r}
+Data$Actuation <- as.factor(Data$Actuation)
+Data <- subset(Data, Data$Actuation == "Grassland" | Data$Actuation == "Shrub")
+
+length(unique(Data$Estacion[Data$Year == 2017 & Data$Season == "Spring"]))
+length(unique(Data$Estacion[Data$Year == 2017 & Data$Season == "Autumn"]))
+length(unique(Data$Estacion[Data$Year == 2017 & Data$Season == "Summer"]))
+
+length(unique(Data$Estacion[Data$Year == 2018 & Data$Season == "Spring"]))
+length(unique(Data$Estacion[Data$Year == 2018 & Data$Season == "Autumn"]))
+length(unique(Data$Estacion[Data$Year == 2018 & Data$Season == "Summer"]))
+
+length(unique(Data$Estacion[Data$Year == 2019 & Data$Season == "Spring"]))
+length(unique(Data$Estacion[Data$Year == 2019 & Data$Season == "Autumn"]))
+length(unique(Data$Estacion[Data$Year == 2019 & Data$Season == "Summer"]))
+length(unique(Data$Estacion[Data$Year == 2019 & Data$Season == "Winter"]))
+```
+
+Las variables relacionadas con la biomasa se van a usar como variables respuesta. Vamos a ver que distribución tienen y si hace falta transformarlas.
+```{r}
+MyVar <- c("Predators", "Detritiveres", "Phytophagous", "Diverse")
+Mydotplot(Data[, MyVar])
+```     
+
+Transformamos las variables de biomasa usando logaritmo. Las representamos de nuevo y observamos que mejoran sustancialmente. Por lo tanto, trabajaremos con estas variables transformadas.
+```{r}
+Data$LPredators <- log10(Data$Predators + 1)
+Data$LDetritiveres <- log10(Data$Detritiveres + 1)
+Data$LPhytophagous <- log10(Data$Phytophagous + 1)
+Data$LDiverse <- log10(Data$Diverse + 1)
+
+MyVar <- c("Predators", "Detritiveres", "Phytophagous", "Diverse",
+           "LPredators", "LDetritiveres", "LPhytophagous", "LDiverse")
+Mydotplot(Data[, MyVar])
+```      
+
+**Correlacion entre todos los índices de vegetación**. Entre GNDVI y GIPVI existe una correlacion = 1 (también entre GIPVI y GSAVI y, por lo tanto, entre GNDVI y GSAVI). Los tres índices estandarizados tienen valores iguales (entre GIPVI y GNDVI) o muy similares (GSAVI) en el summary mostrado más arriba. Esto estaría explicado por la correlación de 1 que existe entre los índices de vegetacion:
+
+```{r fig.width= 15, fig.height= 10}
+#Make fancy pair plots
+Mypairs <- function(Z, PanelNames) {
+   pairs(Z, labels = PanelNames,
+        cex.labels =  4,
+        lower.panel = function(x, y, digits=2, prefix="", cex.cor = 7) {
+          panel.cor(x, y, digits, prefix, cex.cor)}, 
+        upper.panel =  function(x, y) points(x, y, 
+                                             pch = 16, cex = 0.8, 
+                                             col = gray(0.1)))
+  #print(P)
+}
+
+
+MyVar <- c("NIR_bndvi", "NIR_endvi", "NIR_gdvi", "NIR_gipvi", "NIR_gndvi", "NIR_grvi", "NIR_gsavi", "NIR_ndvi")
+PanelNames <- c("BNDVI", "ENDVI", "GDVI", "GIPVI", "GNDVI", "GRVI", "GSAVI", "NDVI")
+
+MyVar <- c("NIR_bndvi", "NIR_endvi", "NIR_gipvi", "NIR_gndvi", "NIR_grvi", "NIR_gsavi", "NIR_ndvi")
+PanelNames <- c("BNDVI", "ENDVI", "GIPVI", "GNDVI", "GRVI", "GSAVI", "NDVI")
+
+Mypairs(Data[,MyVar], PanelNames)
+```
+Coeficientes:
+```{r}
+Coefficients <- c(0.99,0.38,0.92,0.92,0.89,0.92, 0.63, # BNDVI
+                  0.37, 0.87, 0.87, 0.85, 0.87, 0.57, # ENDVI
+                  0.41, 0.41, 0.42, 0.41, 0.41, # GDVI
+                  1, 0.98, 1, 0.83, # GIPVI
+                  0.98, 1, 0.83, # GNDVI
+                  0.98, 0.85, # GRVI
+                  0.83) # NDVI
+
+mean(Coefficients)
+sd(Coefficients)
+```
+
+Observamos la distribucion de los predictores:
+```{r}
+Mydotplot(Data[,MyVar])
+```
+
+Transformadas en logaritmo, no mejoran sustancialmente. Por lo tanto, trabajamos con las variables brutas.
+```{r}
+Data$NIR_NDVILog <- log10(Data$NIR_ndvi + 1)
+Data$NIR_ENDVILog <- log10(Data$NIR_endvi + 1)
+Data$NIR_GDVILog <- log10(Data$NIR_gdvi + 1)
+Data$NIR_GIPVILog <- log10(Data$NIR_gipvi + 1)
+Data$NIR_GNDVILog <- log10(Data$NIR_gndvi + 1)
+Data$NIR_GRVILog <- log10(Data$NIR_grvi + 1)
+Data$NIR_GSAVILog <- log10(Data$NIR_gsavi + 1)
+Data$NIR_BNDVILog <- log10(Data$NIR_bndvi + 1)
+
+MyVar <- c("NIR_NDVILog", "NIR_ENDVILog", "NIR_GDVILog", "NIR_GIPVILog", "NIR_GNDVILog", "NIR_GRVILog", "NIR_GSAVILog", "NIR_BNDVILog")
+Mydotplot(Data[,MyVar])
+```     
+
+Evaluamos la **colinealidad** entre predictores (year, season y cada índice de vegetación). Valores de GVIF^(1/2Df)>2 indican colinealidad. **No existe colinealidad**
+
+**BNDVI**   
+```{r echo= FALSE}
+# Creamos la funcion
+corvif <- function(dataz) {
+  dataz <- as.data.frame(dataz)
+  
+  #vif part
+  form    <- formula(paste("fooy ~ ",paste(strsplit(names(dataz)," "),collapse=" + ")))
+  dataz   <- data.frame(fooy=1 + rnorm(nrow(dataz)) ,dataz)
+  lm_mod  <- lm(form,dataz)
+  
+  cat("\n\nVariance inflation factors\n\n")
+  print(myvif(lm_mod))
+}
+
+# Support function for corvif. Will not be called by the user
+myvif <- function(mod) {
+  v <- vcov(mod)
+  assign <- attributes(model.matrix(mod))$assign
+  if (names(coefficients(mod)[1]) == "(Intercept)") {
+    v <- v[-1, -1]
+    assign <- assign[-1]
+  } else warning("No intercept: vifs may not be sensible.")
+  terms <- labels(terms(mod))
+  n.terms <- length(terms)
+  if (n.terms < 2) stop("The model contains fewer than 2 terms")
+  if (length(assign) > dim(v)[1] ) {
+    diag(tmp_cor)<-0
+    if (any(tmp_cor==1.0)){
+      return("Sample size is too small, 100% collinearity is present")
+    } else {
+      return("Sample size is too small")
+    }
+  }
+  R <- cov2cor(v)
+  detR <- det(R)
+  result <- matrix(0, n.terms, 3)
+  rownames(result) <- terms
+  colnames(result) <- c("GVIF", "Df", "GVIF^(1/2Df)")
+  for (term in 1:n.terms) {
+    subs <- which(assign == term)
+    result[term, 1] <- det(as.matrix(R[subs, subs])) * det(as.matrix(R[-subs, -subs])) / detR
+    result[term, 2] <- length(subs)
+  }
+  if (all(result[, 2] == 1)) {
+    result <- data.frame(GVIF=result[, 1])
+  } else {
+    result[, 3] <- result[, 1]^(1/(2 * result[, 2]))
+  }
+  invisible(result)
+}
+## END VIF FUNCTION
+corvif (Data[, c("Year", "Season", "NIR_bndvi")])
+```
+**ENDVI**   
+```{r echo= FALSE}
+## END VIF FUNCTION
+corvif (Data[, c("Year", "Season", "NIR_endvi")])
+```    
+**GDVI**   
+```{r echo= FALSE}
+## END VIF FUNCTION
+corvif (Data[, c("Year", "Season", "NIR_gdvi")])
+```    
+
+**GIPVI**   
+```{r echo= FALSE}
+## END VIF FUNCTION
+corvif (Data[, c("Year", "Season", "NIR_gipvi")])
+```    
+
+**GNDVI**   
+```{r echo= FALSE}
+## END VIF FUNCTION
+corvif (Data[, c("Year", "Season", "NIR_gndvi")])
+```     
+
+**GRVI**   
+```{r echo= FALSE}
+## END VIF FUNCTION
+corvif (Data[, c("Year", "Season", "NIR_grvi")])
+```    
+
+**GSAVI**   
+```{r echo= FALSE}
+## END VIF FUNCTION
+corvif (Data[, c("Year", "Season", "NIR_gsavi")])
+```   
+     
+
+Quitamos los valores sin datos:
+```{r}
+Data <- Data[-which(is.na(Data$EPIGEOUS_ALL)),]
+```
+
+Transformamos en factores las variables categóricas:
+```{r}
+Data$Year <- as.factor(Data$Year)
+Data$Season <- as.factor(Data$Season)
+Data$Locality <- as.factor(Data$Locality)
+Data$Estacion <- as.factor(Data$Estacion)
+Data$Action <- as.factor(Data$Action)
+Data$Actuation <- as.factor(Data$Actuation)
+str(Data)
+```    
+
+#### 3. Empezamos a trabajar con INLA
+
+De cara a incorporar la autocorrelación espacial, se implementan los siguientes 8 pasos:
+
+1. Crear una 'mesh' o malla
+2. Definir lo weighting factors $a_ik$ (lo que se denomina la proyector matrix)
+3. Definir el SPDE
+4. Definir el spatial field
+5. Hacer un stack. En este proceso le decimos a INLA en que puntos de la 'mesh' hemos muestreado la variables respuesta y las covariables. Tambien necesitamos informarle a INLA (a traves del Stack) en que puntos tenemos otros terminos (p.ej. otros factores aleatorios no espaciales, si los hubiese)
+6. Especificar la formula del modelo en terminos de la variables respuesta, covariables y el termino de autocorrelacion espacial.
+7. Correr el modelo en INLA
+8. Explorar los resultados
+9. Representación conjunta de todos los resultados
+10. Validacion del modelo - Spatial confounding
+
+
+##### **Paso 1**. Crear la mesh o malla
+
+En primer lugar exploramos la distribución de distancias entre los puntos de muestreo: 
+```{r}
+Loc <- cbind(Data$X/1000, Data$Y/1000)
+D <- dist(Loc)
+
+par(mfrow = c(1,2), mar = c(5,5,2,2), cex.lab = 0.75)
+hist(D, 
+     freq = TRUE,
+     main = "", 
+     xlab = "Distancia entre estaciones de muestreo (km)",
+     ylab = "Frecuencia")
+plot (x = sort(D),
+      y = (1:length(D))/length(D),
+      type = "l",
+      xlab = "Distancia entre estaciones de muestreo(km)",
+      ylab = "Proporcion Acumulada")
+```
+
+Vemos que el 50% de las estaciones estan separadas por menos de 22 km. Esta información es útil a la hora de dar prior distributions y de crear la mesh, ya veremos si es necesario emplearla (en caso de que haya problemas de convergencia de los modelos):
+```{r}
+sort(D)[which((1:length(D))/length(D) > 0.49999 & (1:length(D))/length(D) < 0.50001)]
+```
+
+Creamos una malla. La malla resultante tiene 4695 vertices. Cuanto más vértices más tiempo llevará el ajuste del modelo. Empezamos con una malla muy gruesa, esto se puede refinar en un futuro. De todos modos, los resultados no variarán significativamente:  
+```{r}
+Bound <- inla.nonconvex.hull(Loc, convex= -0.15)
+mesh    <- inla.mesh.2d(boundary= Bound, 
+                        max.edge=  c(1,5) # Maxima distancia permitida
+)
+mesh$n
+```  
+
+Representamos la malla:
+```{r, fig.height= 10, fig.width= 10}
+plot(mesh)
+points(Loc, col = 1, pch = 16, cex = 1)
+```
+#####  **Paso 2**. Definir lo weighting factors a_ik (lo que se denomina la proyector matrix)
+
+```{r}
+A2 <- inla.spde.make.A(mesh, loc = Loc)
+dim(A2)
+```
+
+##### **Paso 3**. Definir el SPDE
+
+```{r}
+spde <- inla.spde2.matern(mesh, alpha=2)
+```
+
+##### **Paso 4**. Definir el spatial field u
+
+```{r}
+w.index <- inla.spde.make.index(
+  name    = 'w', 
+  n.spde  = spde$n.spde)
+```
+
+##### **Paso 5**. Hacer un stack 
+
+
+```{r}
+# Polinomios con poly()
+Xm <- model.matrix(~ Year + Season + NIR_ndvi + poly(NIR_ndvi,2) + NIR_endvi + poly(NIR_endvi,2) + 
+                    NIR_gdvi + poly(NIR_gdvi,2) + NIR_gipvi + poly(NIR_gipvi,2) + NIR_gndvi + poly(NIR_gndvi,2) + 
+                    NIR_grvi + poly(NIR_grvi,2) + NIR_gsavi + poly(NIR_gsavi,2) + NIR_bndvi + poly(NIR_bndvi,2), data= Data)
+
+X <- data.frame(Intercept= Xm[,1],
+                Year2018= Xm[,2],
+                Year2019= Xm[,3],
+                SeasonSpring= Xm[,4],
+                SeasonSummer= Xm[,5],
+                SeasonWinter= Xm[,6],
+                NDVI= Xm[,7],
+                NDVI1= Xm[,8],
+                NDVI2 = Xm[,9],
+                ENDVI = Xm[,10],
+                ENDVI1 = Xm[,11],
+                ENDVI2 = Xm[,12],
+                GDVI = Xm[,13],
+                GDVI1 = Xm[,14],
+                GDVI2 = Xm[,15],
+                GIPVI = Xm[,16],
+                GIPVI1 = Xm[,17],
+                GIPVI2 = Xm[,18],
+                GNDVI = Xm[,19],
+                GNDVI1 = Xm[,20],
+                GNDVI2 = Xm[,21],
+                GRVI = Xm[,22],
+                GRVI1 = Xm[,23],
+                GRVI2 = Xm[,24],
+                GSAVI = Xm[,25],
+                GSAVI1 = Xm[,26],
+                GSAVI2 = Xm[,27],
+                BNDVI = Xm[,28],
+                BNDVI1 = Xm[,29],
+                BNDVI2 = Xm[,30])
+
+# Stack para predecir valores y representarlos posteriormente, sin tener en cuenta los factores aleatorios!
+# Creamo una base de datos nueva con 2000 valores de los predictores desde el valor minimo al maximo observado
+MyData <- data.frame(NDVI= rep(seq(from= range(Data$NIR_ndvi)[1],
+                                   to= range(Data$NIR_ndvi)[2],
+                                   length.out= 1000), 9),
+                     NDVI1= rep(poly(seq(from= range(Data$NIR_ndvi)[1],
+                                   to= range(Data$NIR_ndvi)[2],
+                                   length.out= 1000),2)[,1], 9),
+                     NDVI2= rep(poly(seq(from= range(Data$NIR_ndvi)[1],
+                                   to= range(Data$NIR_ndvi)[2],
+                                   length.out= 1000), 2)[,2], 9),
+                     ENDVI= rep(seq(from= range(Data$NIR_endvi)[1],
+                                   to= range(Data$NIR_endvi)[2],
+                                   length.out= 1000), 9),
+                     ENDVI1= rep(poly(seq(from= range(Data$NIR_endvi)[1],
+                                   to= range(Data$NIR_endvi)[2],
+                                   length.out= 1000), 2)[,1], 9),
+                     ENDVI2= rep(poly(seq(from= range(Data$NIR_endvi)[1],
+                                   to= range(Data$NIR_endvi)[2],
+                                   length.out= 1000), 2)[,2], 9),
+                     GDVI= rep(seq(from= range(Data$NIR_gdvi)[1],
+                                   to= range(Data$NIR_gdvi)[2],
+                                   length.out= 1000), 9),
+                     GDVI1= rep(poly(seq(from= range(Data$NIR_gdvi)[1],
+                                   to= range(Data$NIR_gdvi)[2],
+                                   length.out= 1000), 2)[,1], 9),
+                     GDVI2= rep(poly(seq(from= range(Data$NIR_gdvi)[1],
+                                   to= range(Data$NIR_gdvi)[2],
+                                   length.out= 1000), 2)[,2], 9),
+                     GIPVI= rep(seq(from= range(Data$NIR_gipvi)[1],
+                                    to= range(Data$NIR_gipvi)[2],
+                                    length.out= 1000), 9),
+                     GIPVI1= rep(poly(seq(from= range(Data$NIR_gipvi)[1],
+                                    to= range(Data$NIR_gipvi)[2],
+                                    length.out= 1000), 2)[,1], 9),
+                     GIPVI2= rep(poly(seq(from= range(Data$NIR_gipvi)[1],
+                                    to= range(Data$NIR_gipvi)[2],
+                                    length.out= 1000), 2)[,2], 9),
+                     GNDVI= rep(seq(from= range(Data$NIR_gndvi)[1],
+                                    to= range(Data$NIR_gndvi)[2],
+                                    length.out= 1000), 9),
+                     GNDVI1= rep(poly(seq(from= range(Data$NIR_gndvi)[1],
+                                    to= range(Data$NIR_gndvi)[2],
+                                    length.out= 1000), 2)[,1], 9),
+                     GNDVI2= rep(poly(seq(from= range(Data$NIR_gndvi)[1],
+                                    to= range(Data$NIR_gndvi)[2],
+                                    length.out= 1000), 2)[,2], 9),
+                     GRVI= rep(seq(from= range(Data$NIR_grvi)[1],
+                                   to= range(Data$NIR_grvi)[2],
+                                   length.out= 1000), 9),
+                     GRVI1= rep(poly(seq(from= range(Data$NIR_grvi)[1],
+                                   to= range(Data$NIR_grvi)[2],
+                                   length.out= 1000), 2)[,1], 9),
+                     GRVI2= rep(poly(seq(from= range(Data$NIR_grvi)[1],
+                                   to= range(Data$NIR_grvi)[2],
+                                   length.out= 1000), 2)[,2], 9),
+                     GSAVI= rep(seq(from= range(Data$NIR_gsavi)[1],
+                                    to= range(Data$NIR_gsavi)[2],
+                                    length.out= 1000), 9),
+                     GSAVI1= rep(poly(seq(from= range(Data$NIR_gsavi)[1],
+                                    to= range(Data$NIR_gsavi)[2],
+                                    length.out= 1000), 2)[,1], 9),
+                     GSAVI2= rep(poly(seq(from= range(Data$NIR_gsavi)[1],
+                                    to= range(Data$NIR_gsavi)[2],
+                                    length.out= 1000), 2)[,2], 9),
+                     BNDVI= rep(seq(from= range(Data$NIR_bndvi)[1],
+                                    to= range(Data$NIR_bndvi)[2],
+                                    length.out= 1000), 9),
+                     BNDVI1= rep(poly(seq(from= range(Data$NIR_bndvi)[1],
+                                    to= range(Data$NIR_bndvi)[2],
+                                    length.out= 1000), 2)[,1], 9),
+                     BNDVI2= rep(poly(seq(from= range(Data$NIR_bndvi)[1],
+                                    to= range(Data$NIR_bndvi)[2],
+                                    length.out= 1000), 2)[,2], 9),
+                     Year= c(rep(2017, 1000*2), rep(2018, 1000*3), rep(2019, 1000*4)),
+                     Season= c(rep("Summer", 1000), rep("Spring", 1000), 
+                              rep("Summer", 1000), rep("Spring", 1000), rep("Autumn", 1000),
+                              rep("Winter", 1000), rep("Summer", 1000), rep("Spring", 1000), rep("Autumn", 1000)))
+
+MyData$Season <- as.factor(MyData$Season)
+MyData$Year <- as.factor(MyData$Year)
+
+
+## Polinomios con poly()
+Xpred <- model.matrix(~ Year + Season + NDVI + NDVI1 + NDVI2 + ENDVI + ENDVI1 + ENDVI2 + GDVI + GDVI1 + GDVI2 + GIPVI + GIPVI1 + GIPVI2 +
+                      GNDVI + GNDVI1 + GNDVI2 + GRVI + GRVI1 + GRVI2 + GSAVI + GSAVI1 + GSAVI2 + BNDVI + BNDVI1 + BNDVI2,
+                      data= MyData)
+
+Xpred <- data.frame(Intercept= Xpred[,1],
+                    Year2018= Xpred[,2],
+                    Year2019= Xpred[,3],
+                    SeasonSpring= Xpred[,4],
+                    SeasonSummer= Xpred[,5],
+                    SeasonWinter= Xpred[,6],
+                    NDVI = Xpred[,7],
+                    NDVI1 = Xpred[,8], 
+                    NDVI2 = Xpred[,9],
+                    ENDVI = Xpred[,10],
+                    ENDVI1 = Xpred[,11],
+                    ENDVI2 = Xpred[,12],
+                    GDVI = Xpred[,13],
+                    GDVI1 = Xpred[,14],
+                    GDVI2 = Xpred[,15],
+                    GIPVI = Xpred[,16],
+                    GIPVI1 = Xpred[,17],
+                    GIPVI2 = Xpred[,18],
+                    GNDVI = Xpred[,19],
+                    GNDVI1 = Xpred[,20],
+                    GNDVI2 = Xpred[,21],
+                    GRVI = Xpred[,22],
+                    GRVI1 = Xpred[,23],
+                    GRVI2 = Xpred[,24],
+                    GSAVI = Xpred[,25],
+                    GSAVI1 = Xpred[,26],
+                    GSAVI2 = Xpred[,27],
+                    BNDVI = Xpred[,28],
+                    BNDVI1 = Xpred[,29],
+                    BNDVI2 = Xpred[,30])
+
+
+StackCov <- inla.stack(
+  tag = "Covariates",
+  data = list(y = NA),  # NA values because we are going to predict these ones!
+  A = list(1),                  
+  effects = list(Xp = Xpred))
+
+# Stack para la biomasa de predators
+StackFit_Predators <- inla.stack(
+  tag  = "Fit",
+  data = list(y = Data$LPredators),  
+  A    = list(1,A2),  # Intercept and covariates, spatial field                    
+  effects = list(X = X, #Intercept and Covariates
+                 w = w.index))          #Spatial field  
+
+# Stack para la biomasa de detritiveres
+StackFit_Detritiveres <- inla.stack(
+  tag  = "Fit",
+  data = list(y = Data$LDetritiveres),  
+  A    = list(1,A2),  # Intercept and covariates, spatial field                    
+  effects = list(X = X, #Intercept and Covariates
+                 w = w.index))          #Spatial field 
+
+# Stack para la biomasa de phytophagous
+StackFit_Phytophagous <- inla.stack(
+  tag  = "Fit",
+  data = list(y = Data$LPhytophagous),  
+  A    = list(1,A2),  # Intercept and covariates, spatial field                    
+  effects = list(X = X, #Intercept and Covariates
+                 w = w.index))          #Spatial field
+
+# Stack para la biomasa de Diverse
+StackFit_Diverse <- inla.stack(
+  tag  = "Fit",
+  data = list(y = Data$LDiverse),  
+  A    = list(1,A2),  # Intercept and covariates, spatial field                    
+  effects = list(X = X, #Intercept and Covariates
+                 w = w.index))          #Spatial field
+
+All.stacks_Predators <- inla.stack(StackFit_Predators, StackCov)
+All.stacks_Detritiveres <- inla.stack(StackFit_Detritiveres, StackCov)
+All.stacks_Phytophagous <- inla.stack(StackFit_Phytophagous, StackCov)
+All.stacks_Diverse<- inla.stack(StackFit_Diverse, StackCov)
+```
+
+
+
+##### **Paso 6**. Especificar la formula del modelo en terminos de la variables respuesta, covariables y el termino de autocorrelacion espacial
+
+Describimos la ecuación de los modelos (término lineal y cuadrático)
+
+```{r}
+#*2* Analizando el efecto de los indices de vegetacion en la biomasa de epigeos
+# BNDVI Modelo Espacial f(w, model= spde)
+f2.BNDVI <- y ~ -1 + Intercept + Year2018 + Year2019 + SeasonSpring + SeasonSummer + SeasonWinter + scale(BNDVI1) + scale(BNDVI2)  + f(w, model = spde)
+
+# ENDVI Modelo Espacial f(w, model= spde)
+f2.ENDVI <- y ~ -1 + Intercept + Year2018 + Year2019 + SeasonSpring + SeasonSummer + SeasonWinter + scale(ENDVI1) + scale(ENDVI2) + f(w, model = spde)
+
+# GDVI Modelo Espacial f(w, model= spde)
+f2.GDVI <- y ~ -1 + Intercept + Year2018 + Year2019 + SeasonSpring + SeasonSummer + SeasonWinter +  scale(GDVI1)  + scale(GDVI2) + f(w, model = spde)
+
+# GIPVI Modelo Espacial f(w, model= spde)
+f2.GIPVI <- y ~ -1 + Intercept + Year2018 + Year2019 + SeasonSpring + SeasonSummer + SeasonWinter + scale(GIPVI1)  + scale(GIPVI2) + f(w, model = spde)
+
+# GNDVI Modelo Espacial f(w, model= spde)
+f2.GNDVI <- y ~ -1 + Intercept + Year2018 + Year2019 + SeasonSpring + SeasonSummer + SeasonWinter + scale(GNDVI1)  + scale(GNDVI2) + f(w, model = spde)
+
+# GRVI Modelo Espacial f(w, model= spde)
+f2.GRVI <- y ~ -1 + Intercept + Year2018 + Year2019 + SeasonSpring + SeasonSummer + SeasonWinter +  scale(GRVI1)  + scale(GRVI2) + f(w, model = spde)
+
+# GSAVI Modelo Espacial f(w, model= spde)
+f2.GSAVI <- y ~ -1 + Intercept + Year2018 + Year2019 + SeasonSpring + SeasonSummer + SeasonWinter + scale(GSAVI1)  + scale(GSAVI2)  + f(w, model = spde)
+
+# NDVI Modelo Espacial f(w, model= spde)
+f2.NDVI <- y ~ -1 + Intercept + Year2018 + Year2019 + SeasonSpring + SeasonSummer + SeasonWinter + scale(NDVI1) + scale(NDVI2) + f(w, model = spde)
+```
+
+#### A. **Biomasa de Predatory Arthropods**
+
+##### **Paso 7**. Correr el modelo en INLA
+
+Ajustamos los modelos para la **biomasa de epígeos** y todos los índices de vegetación:
+
+```{r}
+#*2* Analizando el efecto de los indices de vegetacion en la biomasa de epigeos
+# BNDVI
+model.INLA.BNDVI.Preda <- inla(f2.BNDVI,
+                   family = "gaussian", 
+                   data = inla.stack.data(All.stacks_Predators),
+                   control.predictor = list(A = inla.stack.A(All.stacks_Predators), compute= TRUE),
+                   control.compute = list(waic= TRUE, dic= TRUE)) # Modelo Espacial
+
+# ENDVI
+model.INLA.ENDVI.Preda <- inla(f2.ENDVI,
+                   family = "gaussian", 
+                   data = inla.stack.data(All.stacks_Predators),
+                   control.predictor = list(A = inla.stack.A(All.stacks_Predators), compute= TRUE),
+                   control.compute = list(waic= TRUE, dic= TRUE)) # Modelo Espacial
+
+# GDVI
+model.INLA.GDVI.Preda <- inla(f2.GDVI,
+                   family = "gaussian", 
+                   data = inla.stack.data(All.stacks_Predators),
+                   control.predictor = list(A = inla.stack.A(All.stacks_Predators), compute= TRUE),
+                   control.compute = list(waic= TRUE, dic= TRUE)) # Modelo Espacial
+
+# GIPVI
+model.INLA.GIPVI.Preda <- inla(f2.GIPVI,
+                   family = "gaussian", 
+                   data = inla.stack.data(All.stacks_Predators),
+                   control.predictor = list(A = inla.stack.A(All.stacks_Predators), compute= TRUE),
+                   control.compute = list(waic= TRUE, dic= TRUE)) # Modelo Espacial
+
+# GNDVI
+model.INLA.GNDVI.Preda <- inla(f2.GNDVI,
+                   family = "gaussian", 
+                   data = inla.stack.data(All.stacks_Predators),
+                   control.predictor = list(A = inla.stack.A(All.stacks_Predators), compute= TRUE),
+                   control.compute = list(waic= TRUE, dic= TRUE)) # Modelo Espacial
+
+# GRVI
+model.INLA.GRVI.Preda <- inla(f2.GRVI,
+                   family = "gaussian", 
+                   data = inla.stack.data(All.stacks_Predators),
+                   control.predictor = list(A = inla.stack.A(All.stacks_Predators), compute= TRUE),
+                   control.compute = list(waic= TRUE, dic= TRUE)) # Modelo Espacial
+
+# GSAVI
+model.INLA.GSAVI.Preda <- inla(f2.GSAVI,
+                   family = "gaussian", 
+                   data = inla.stack.data(All.stacks_Predators),
+                   control.predictor = list(A = inla.stack.A(All.stacks_Predators), compute= TRUE),
+                   control.compute = list(waic= TRUE, dic= TRUE)) # Modelo Espacial
+
+# NDVI
+model.INLA.NDVI.Preda <- inla(f2.NDVI,
+                   family = "gaussian", 
+                   data = inla.stack.data(All.stacks_Predators),
+                   control.predictor = list(A = inla.stack.A(All.stacks_Predators), compute= TRUE),
+                   control.compute = list(waic= TRUE, dic= TRUE)) # Modelo Espacial
+```
+
+
+##### **Paso 8**. Explorar los resultados
+
+**BNDVI** Término lineal (+)
+
+```{r}
+model.INLA.BNDVI.Preda$summary.fixed[, c("mean", "sd", "0.025quant", "0.975quant")]
+```  
+
+**ENDVI** Término lineal (+)
+
+```{r echo= FALSE}
+model.INLA.ENDVI.Preda$summary.fixed[, c("mean", "sd", "0.025quant", "0.975quant")]
+```  
+
+**GDVI**  Temino lineal (+) y Termino cuadratico (-)
+
+```{r echo= FALSE}
+model.INLA.GDVI.Preda$summary.fixed[, c("mean", "sd", "0.025quant", "0.975quant")]
+```  
+
+
+**GIPVI**  Termino lineal (+)
+
+
+```{r echo= FALSE}
+model.INLA.GIPVI.Preda$summary.fixed[, c("mean", "sd", "0.025quant", "0.975quant")]
+```  
+
+
+**GNDVI**  Termino lineal (+)
+
+```{r echo= FALSE}
+model.INLA.GNDVI.Preda$summary.fixed[, c("mean", "sd", "0.025quant", "0.975quant")]
+```  
+
+
+**GRVI**  Termino lineal (+)
+
+```{r echo= FALSE}
+model.INLA.GRVI.Preda$summary.fixed[, c("mean", "sd", "0.025quant", "0.975quant")]
+```  
+
+
+**GSAVI**  Termino lineal (+)
+
+```{r echo= FALSE}
+model.INLA.GSAVI.Preda$summary.fixed[, c("mean", "sd", "0.025quant", "0.975quant")]
+```  
+
+
+**NDVI**  No hay efecto con los dos terminos a la vez
+
+```{r echo= FALSE}
+model.INLA.NDVI.Preda$summary.fixed[, c("mean", "sd", "0.025quant", "0.975quant")]
+```    
+
+##### **Paso 10**. Validacion del modelo ¿Existe spatial confounding?
+
+**A.** Obtenemos los interceptos aleatorios espaciales para cada observacion en cada uno de los modelos
+
+```{r}
+w.proj <- inla.mesh.projector(mesh, loc =  Loc)
+
+# u_i para cada modelo
+w.pm_BNDVI   <- inla.mesh.project(w.proj, model.INLA.BNDVI.Preda$summary.random$w$mean)
+w.pm_ENDVI   <- inla.mesh.project(w.proj, model.INLA.ENDVI.Preda$summary.random$w$mean)
+w.pm_GDVI   <- inla.mesh.project(w.proj, model.INLA.GDVI.Preda$summary.random$w$mean)
+w.pm_GIPVI   <- inla.mesh.project(w.proj, model.INLA.GIPVI.Preda$summary.random$w$mean)
+w.pm_GNDVI   <- inla.mesh.project(w.proj, model.INLA.GNDVI.Preda$summary.random$w$mean)
+w.pm_GRVI   <- inla.mesh.project(w.proj, model.INLA.GRVI.Preda$summary.random$w$mean)
+w.pm_GSAVI   <- inla.mesh.project(w.proj, model.INLA.GSAVI.Preda$summary.random$w$mean)
+w.pm_NDVI   <- inla.mesh.project(w.proj, model.INLA.NDVI.Preda$summary.random$w$mean)
+```
+
+**B.** Ajustamos un modelo enfrentando los valores del intercepto aleatorio espacial frente al factor fijo Type.
+
+En el caso del **BNDVI** observamos que existe 'Spatial Confounding', es decir, el término lineal del 'bndvi' está relacionado con la componente espacial del modelo. Por lo tanto, los resultados presentados mas arriba no son contundentes.
+
+```{r}
+SCbndvi <- inla (w.pm_BNDVI ~ scale(BNDVI),
+               family= "gaussian",
+                data = X,
+                   control.compute = list(dic = TRUE, waic = TRUE)
+                    )
+SCbndvi$summary.fixed[, c("mean", "sd", "0.025quant", "0.975quant")]
+```   
+
+En el caso del **ENDVI** existe 'Spatial Confounding' con el término lineal y el cuadrático
+```{r echo= FALSE}
+SCendvi <- inla (w.pm_ENDVI ~ scale(ENDVI),
+               family= "gaussian",
+                data = X,
+                   control.compute = list(dic = TRUE, waic = TRUE)
+                    )
+SCendvi$summary.fixed[, c("mean", "sd", "0.025quant", "0.975quant")]
+```   
+Ajustamos el modelo solo con el termino lineal y sigue sin existir Spatial Confounding:
+```{r}
+# NDVI Modelo Espacial f(w, model= spde)
+f2.ENDVIb <- y ~ -1 + Intercept + Year2018 + Year2019 + SeasonSpring + SeasonSummer + SeasonWinter + scale(ENDVI) + f(w, model = spde)
+
+# ENDVI
+model.INLA.ENDVI.Preda <- inla(f2.ENDVIb,
+                   family = "gaussian", 
+                   data = inla.stack.data(All.stacks_Predators),
+                   control.predictor = list(A = inla.stack.A(All.stacks_Predators), compute= TRUE),
+                   control.compute = list(waic= TRUE, dic= TRUE)) # Modelo Espacial
+
+w.proj <- inla.mesh.projector(mesh, loc =  Loc)
+w.pm_ENDVI   <- inla.mesh.project(w.proj, model.INLA.ENDVI.Preda$summary.random$w$mean)
+
+SCendvi <- inla (w.pm_ENDVI ~ scale(ENDVI),
+               family= "gaussian",
+                data = X,
+                   control.compute = list(dic = TRUE, waic = TRUE)
+                    )
+SCendvi$summary.fixed[, c("mean", "sd", "0.025quant", "0.975quant")]
+```
+```{r}
+index.Cov <- inla.stack.index(All.stacks_Predators,
+                              tag = "Covariates")$data
+
+Predichos <- model.INLA.ENDVI.Preda$summary.fitted.values[index.Cov, c(1,3,5)]
+
+# Mean values
+Predicted.mean <- vector(length= 1000)
+Predicted.BCILow <- vector(length= 1000) 
+Predicted.BCIHigh <- vector(length= 1000)
+
+for(x in 1:1000){
+  items <- which(MyData$ENDVI == unique(MyData$ENDVI)[x])
+  Predicted.mean [x] <- mean(Predichos[items, 1])
+  Predicted.BCILow [x] <- mean(Predichos[items, 2])
+  Predicted.BCIHigh [x] <- mean(Predichos[items, 3])
+}
+
+# It is the second one we need as these are for the
+# artificial covariate values.
+# Add them to the MyData object.
+MyData1 <- data.frame (ENDVI= unique(MyData$ENDVI), Predicted.mean, Predicted.BCILow, Predicted.BCIHigh) 
+
+MyData1 <- rename(MyData1, 
+                  c("Predicted.mean" = "Predicted.meanlog", 
+                    "Predicted.BCILow" = "Predicted.BCILowlog",
+                    "Predicted.BCIHigh" = "Predicted.BCIHighlog"))
+MyData1$Predicted.mean <- exp(MyData1$Predicted.meanlog) - 1
+MyData1$Predicted.BCIHigh <- exp(MyData1$Predicted.BCIHighlog) -1
+MyData1$Predicted.BCILow <- exp(MyData1$Predicted.BCILowlog) -1
+
+p.ENDVI <- ggplot(data=MyData1, aes(x=ENDVI, ymin = Predicted.BCILow, ymax = Predicted.BCIHigh,  y= Predicted.mean)) + 
+  geom_line(size= 1) + 
+  geom_ribbon(alpha=0.3)
+
+p.ENDVI <- p.ENDVI +  geom_jitter (aes (x=NIR_endvi, y = Predators), data= Data, alpha= 0.6, inherit.aes = FALSE, size= 4, show.legend = FALSE) +
+  xlab("ENDVI") + 
+  ylab("") + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_line(colour = "black", size= 1.5), 
+                                                axis.title.x = element_text(size = 30, margin = margin(t = 5, r = 0, b = 0, l = 0)),
+                                                axis.title.y = element_text(size = 30, margin = margin(t = 0, r = 10, b = 0, l = 0)), 
+                                                axis.text = element_text(size= 25), plot.margin = unit(c(0.5, 0.5, 1, 1), "cm"))
+
+```   
+
+
+```{r echo= FALSE}
+p.ENDVI.log <- ggplot(data=MyData1, aes(x=ENDVI, y= Predicted.meanlog)) + 
+  geom_line(size= 1.5) + 
+  geom_jitter (aes (x=NIR_ndvi, y = LPredators), data= Data, alpha= 0.4, inherit.aes = FALSE, size= 4, show.legend = FALSE)
+ 
+
+p.ENDVI.log <- p.ENDVI.log +  geom_ribbon(aes(x= ENDVI, ymin = Predicted.BCILowlog, ymax = Predicted.BCIHighlog,  y= Predicted.meanlog), alpha=0.3)  +
+  xlab("ENDVI") + 
+  ylab("") + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_line(colour = "black", size= 1.5), 
+                                                axis.title.x = element_text(size = 30, margin = margin(t = 5, r = 0, b = 0, l = 0)),
+                                                axis.title.y = element_text(size = 30, margin = margin(t = 0, r = 10, b = 0, l = 0)), 
+                                                axis.text = element_text(size= 25), plot.margin = unit(c(0.5, 0.5, 1, 1), "cm"))
+
+```   
+
+En el caso del **GDVI** existe 'Spatial Confounding' con el término lineal
+
+```{r echo= FALSE}
+SCgdvi <- inla (w.pm_GDVI ~ scale(GDVI),
+               family= "gaussian",
+                data = X,
+                   control.compute = list(dic = TRUE, waic = TRUE)
+                    )
+SCgdvi$summary.fixed[, c("mean", "sd", "0.025quant", "0.975quant")]
+```   
+
+En el caso del **GIPVI** existe 'Spatial Confounding' con el término lineal
+
+```{r echo= FALSE}
+SCgipvi <- inla (w.pm_GIPVI ~ scale(GIPVI),
+               family= "gaussian",
+                data = X,
+                   control.compute = list(dic = TRUE, waic = TRUE)
+                    )
+SCgipvi$summary.fixed[, c("mean", "sd", "0.025quant", "0.975quant")]
+```   
+
+En el caso del **GNDVI** existe 'Spatial Confounding' con el término lineal
+
+```{r echo= FALSE}
+SCgndvi <- inla (w.pm_GNDVI ~ scale(GNDVI),
+               family= "gaussian",
+                data = X,
+                   control.compute = list(dic = TRUE, waic = TRUE)
+                    )
+SCgndvi$summary.fixed[, c("mean", "sd", "0.025quant", "0.975quant")]
+```   
+
+En el caso del **GRVI** existe 'Spatial Confounding' con el término lineal
+
+```{r echo= FALSE}
+SCgrvi <- inla (w.pm_GRVI ~ scale(GRVI),
+               family= "gaussian",
+                data = X,
+                   control.compute = list(dic = TRUE, waic = TRUE)
+                    )
+SCgrvi$summary.fixed[, c("mean", "sd", "0.025quant", "0.975quant")]
+```    
+
+En el caso del **GSAVI** existe 'Spatial Confounding' con el término lineal.
+
+```{r echo= FALSE}
+SCgsavi <- inla (w.pm_GSAVI ~ scale(GSAVI),
+               family= "gaussian",
+                data = X,
+                   control.compute = list(dic = TRUE, waic = TRUE)
+                    )
+SCgsavi$summary.fixed[, c("mean", "sd", "0.025quant", "0.975quant")]
+```   
+
+
+En el caso del **NDVI** existe 'Spatial Confounding'.
+
+```{r echo= FALSE}
+SCndvi <- inla (w.pm_NDVI ~ scale(NDVI),
+               family= "gaussian",
+                data = X,
+                   control.compute = list(dic = TRUE, waic = TRUE)
+                    )
+SCndvi$summary.fixed[, c("mean", "sd", "0.025quant", "0.975quant")]
+```   
+
+
+Por lo tanto, lo que tenemos que hacer ahora es ajustar de nuevo los modelos estableciendo restricciones en la componente espacial! El Spatial confoundgin siempre se da con el termino lineal. Vamos a ello:
+
+### **Paso 6**. Especificar la formula del modelo en terminos de la variables respuesta, covariables y el termino de autocorrelacion espacial.
+
+Para establecer restricciones en la componente en la espacial necesitamos lo siguiente:
+```{r}
+XBNDVI <- data.frame(Intercept= Xm[,1], Year2018= Xm[,2], Year2019= Xm[,3], SeasonSpring= Xm[,4], SeasonSummer= Xm[,5], SeasonWinter= Xm[,6],
+                    BNDVI1 = scale(Xm[,29]), BNDVI2 = scale(Xm[,30]))
+XGDVI <- data.frame(Intercept= Xm[,1], Year2018= Xm[,2], Year2019= Xm[,3], SeasonSpring= Xm[,4], SeasonSummer= Xm[,5], SeasonWinter= Xm[,6],
+                    GDVI1 = scale(Xm[,14]), GDVI2 = scale(Xm[,15]))
+XGIPVI <- data.frame(Intercept= Xm[,1], Year2018= Xm[,2], Year2019= Xm[,3], SeasonSpring= Xm[,4], SeasonSummer= Xm[,5], SeasonWinter= Xm[,6],
+                     GIPVI1 = scale(Xm[,17]), GIPVI2 = scale(Xm[,18]))
+XGNDVI <- data.frame(Intercept= Xm[,1], Year2018= Xm[,2], Year2019= Xm[,3], SeasonSpring= Xm[,4], SeasonSummer= Xm[,5], SeasonWinter= Xm[,6],
+                     GNDVI1 = scale(Xm[,20]), GNDVI2 = scale(Xm[,21]))
+XGRVI <- data.frame(Intercept= Xm[,1], Year2018= Xm[,2], Year2019= Xm[,3], SeasonSpring= Xm[,4], SeasonSummer= Xm[,5], SeasonWinter= Xm[,6],
+                     GRVI1 = scale(Xm[,23]), GRVI2 = scale(Xm[,24]))
+XGSAVI <- data.frame(Intercept= Xm[,1], Year2018= Xm[,2], Year2019= Xm[,3], SeasonSpring= Xm[,4], SeasonSummer= Xm[,5], SeasonWinter= Xm[,6],
+                    GSAVI1 = scale(Xm[,26]), GSAVI2 = scale(Xm[,27]))
+XNDVI <- data.frame(Intercept= Xm[,1], Year2018= Xm[,2], Year2019= Xm[,3], SeasonSpring= Xm[,4], SeasonSummer= Xm[,5], SeasonWinter= Xm[,6],
+                    NDVI1 = scale(Xm[,8]), NDVI2 = scale(Xm[,9]))
+
+n.covariates.poly= 8 # Intercepto + Year(2) + Month (3) + polinomico de cada indice de vegetacion (2)
+n.covariates= 7 # Intercepto + Year(2) + Month (3) + termino lineal de cada indice de vegetacion (1)
+
+Qfact.BNDVI = qr.Q(qr(XBNDVI))
+Qfact.GDVI = qr.Q(qr(XGDVI))
+Qfact.GIPVI = qr.Q(qr(XGIPVI))
+Qfact.GNDVI = qr.Q(qr(XGNDVI))
+Qfact.GRVI = qr.Q(qr(XGRVI))
+Qfact.GSAVI = qr.Q(qr(XGSAVI))
+Qfact.NDVI = qr.Q(qr(XNDVI))
+```
+
+Describimos las ecuaciones de los modelos. Inicialmente testamos el efecto de los términos lineal y cuadrático. No obstante, si el término cuadrático no tuvo efecto, se borró de la ecuación.
+
+```{r}
+f3.BNDVI <- y ~ -1 + Intercept + Year2018 + Year2019 + SeasonSpring + SeasonSummer + SeasonWinter + scale(BNDVI1) +  scale(BNDVI2) + 
+  f(w, model = spde, extraconstr = list(A = as.matrix(t(Qfact.BNDVI)%*%A2), e= rep(0,n.covariates.poly)))
+
+f3.GDVI <- y ~ -1 + Intercept + Year2018 + Year2019 + SeasonSpring + SeasonSummer + SeasonWinter +  scale(GDVI1) +  scale(GDVI2) + 
+  f(w, model = spde, extraconstr = list(A = as.matrix(t(Qfact.GDVI)%*%A2), e= rep(0,n.covariates.poly)))
+
+f3.GIPVI <- y ~ -1 + Intercept + Year2018 + Year2019 + SeasonSpring + SeasonSummer + SeasonWinter +  scale(GIPVI1) + scale(GIPVI2) +
+  f(w, model = spde, extraconstr = list(A = as.matrix(t(Qfact.GIPVI)%*%A2), e= rep(0,n.covariates.poly)))
+
+f3.GNDVI <- y ~ -1 + Intercept + Year2018 + Year2019 + SeasonSpring + SeasonSummer + SeasonWinter +  scale(GNDVI1) + scale(GNDVI2) +
+  f(w, model = spde, extraconstr = list(A = as.matrix(t(Qfact.GNDVI)%*%A2), e= rep(0,n.covariates.poly)))
+
+f3.GRVI <- y ~ -1 + Intercept + Year2018 + Year2019 + SeasonSpring + SeasonSummer + SeasonWinter + scale(GRVI1) + scale(GRVI2) +
+  f(w, model = spde, extraconstr = list(A = as.matrix(t(Qfact.GRVI)%*%A2), e= rep(0,n.covariates.poly)))
+
+f3.GSAVI <- y ~ -1 + Intercept + Year2018 + Year2019 + SeasonSpring + SeasonSummer + SeasonWinter +  scale(GSAVI1) + scale(GSAVI2) +
+  f(w, model = spde, extraconstr = list(A = as.matrix(t(Qfact.GSAVI)%*%A2), e= rep(0,n.covariates.poly)))
+
+f3.NDVI <- y ~ -1 + Intercept + Year2018 + Year2019 + SeasonSpring + SeasonSummer + SeasonWinter +  scale(NDVI1)  + scale(NDVI2)  +
+  f(w, model = spde, extraconstr = list(A = as.matrix(t(Qfact.NDVI)%*%A2), e= rep(0,n.covariates.poly)))
+
+```
+
+
+### **Paso 7**. Correr el modelo en INLA
+
+Ajustamos los modelos para la **biomasa de epigeos** y todos los indices de vegetacion:
+
+```{r}
+#*2* Analizando el efecto de los indices de vegetacion en la biomasa de epigeos
+# BNDVI
+model.INLA.BNDVI.Preda_SC <- inla(f3.BNDVI,
+                   family = "gaussian", 
+                   data = inla.stack.data(All.stacks_Predators),
+                   control.predictor = list(A = inla.stack.A(All.stacks_Predators), compute= TRUE),
+                   control.compute = list(waic= TRUE, dic= TRUE)) # Modelo Espacial
+
+# GDVI
+model.INLA.GDVI.Preda_SC <- inla(f3.GDVI,
+                   family = "gaussian", 
+                   data = inla.stack.data(All.stacks_Predators),
+                   control.predictor = list(A = inla.stack.A(All.stacks_Predators), compute= TRUE),
+                   control.compute = list(waic= TRUE, dic= TRUE)) # Modelo Espacial
+
+# GIPVI
+model.INLA.GIPVI.Preda_SC <- inla(f3.GIPVI,
+                   family = "gaussian", 
+                   data = inla.stack.data(All.stacks_Predators),
+                   control.predictor = list(A = inla.stack.A(All.stacks_Predators), compute= TRUE),
+                   control.compute = list(waic= TRUE, dic= TRUE)) # Modelo Espacial
+
+# GNDVI
+model.INLA.GNDVI.Preda_SC <- inla(f3.GNDVI,
+                   family = "gaussian", 
+                   data = inla.stack.data(All.stacks_Predators),
+                   control.predictor = list(A = inla.stack.A(All.stacks_Predators), compute= TRUE),
+                   control.compute = list(waic= TRUE, dic= TRUE)) # Modelo Espacial
+
+# GRVI
+model.INLA.GRVI.Preda_SC <- inla(f3.GRVI,
+                   family = "gaussian", 
+                   data = inla.stack.data(All.stacks_Predators),
+                   control.predictor = list(A = inla.stack.A(All.stacks_Predators), compute= TRUE),
+                   control.compute = list(waic= TRUE, dic= TRUE)) # Modelo Espacial
+
+# GSAVI
+model.INLA.GSAVI.Preda_SC <- inla(f3.GSAVI,
+                   family = "gaussian", 
+                   data = inla.stack.data(All.stacks_Predators),
+                   control.predictor = list(A = inla.stack.A(All.stacks_Predators), compute= TRUE),
+                   control.compute = list(waic= TRUE, dic= TRUE)) # Modelo Espacial
+
+# NDVI
+model.INLA.NDVI.Preda_SC <- inla(f3.NDVI,
+                   family = "gaussian", 
+                   data = inla.stack.data(All.stacks_Predators),
+                   control.predictor = list(A = inla.stack.A(All.stacks_Predators), compute= TRUE),
+                   control.compute = list(waic= TRUE, dic= TRUE)) # Modelo Espacial
+
+```
+
+
+##### **Paso 8**. Explorar los resultados
+
+**BNDVI** Término lineal (+) y cuadrático (+)
+
+```{r}
+model.INLA.BNDVI.Preda_SC$summary.fixed[, c("mean", "sd", "0.025quant", "0.975quant")]
+```  
+
+
+```{r}
+index.Cov <- inla.stack.index(All.stacks_Predators,
+                              tag = "Covariates")$data
+
+Predichos <- model.INLA.BNDVI.Preda_SC$summary.fitted.values[index.Cov, c(1,3,5)]
+
+# Mean values
+Predicted.mean <- vector(length= 1000)
+Predicted.BCILow <- vector(length= 1000) 
+Predicted.BCIHigh <- vector(length= 1000)
+
+for(x in 1:1000){
+  items <- which(MyData$BNDVI == unique(MyData$BNDVI)[x])
+  Predicted.mean [x] <- mean(Predichos[items, 1])
+  Predicted.BCILow [x] <- mean(Predichos[items, 2])
+  Predicted.BCIHigh [x] <- mean(Predichos[items, 3])
+}
+
+# It is the second one we need as these are for the
+# artificial covariate values.
+# Add them to the MyData object.
+MyData1 <- data.frame (BNDVI= unique(MyData$BNDVI), Predicted.mean, Predicted.BCILow, Predicted.BCIHigh) 
+
+MyData1 <- rename(MyData1, 
+                  c("Predicted.mean" = "Predicted.meanlog", 
+                    "Predicted.BCILow" = "Predicted.BCILowlog",
+                    "Predicted.BCIHigh" = "Predicted.BCIHighlog"))
+MyData1$Predicted.mean <- exp(MyData1$Predicted.meanlog) - 1
+MyData1$Predicted.BCIHigh <- exp(MyData1$Predicted.BCIHighlog) -1
+MyData1$Predicted.BCILow <- exp(MyData1$Predicted.BCILowlog) -1
+
+p.BNDVI <- ggplot(data=MyData1, aes(x=BNDVI, ymin = Predicted.BCILow, ymax = Predicted.BCIHigh,  y= Predicted.mean)) + 
+  geom_line(size= 1) + 
+  geom_ribbon(alpha=0.3)
+
+p.BNDVI <- p.BNDVI +  geom_jitter (aes (x=NIR_bndvi, y = Predators), data= Data, alpha= 0.6, inherit.aes = FALSE, size= 4, show.legend = FALSE) +
+  xlab("BNDVI") + 
+  ylab("Predatory arthropodos (mg)") + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_line(colour = "black", size= 1.5), 
+                                                axis.title.x = element_text(size = 33, margin = margin(t = 5, r = 0, b = 0, l = 0)),
+                                                axis.title.y = element_text(size = 33, margin = margin(t = 0, r = 10, b = 0, l = 0)), 
+                                                axis.text = element_text(size= 27),  plot.margin = unit(c(0.5, 0.5, 1, 1), "cm"))
+
+```   
+
+
+```{r echo= FALSE}
+p.BNDVI.log <- ggplot(data=MyData1, aes(x=BNDVI, y= Predicted.meanlog)) + 
+  geom_line(size= 1.5) + 
+  geom_jitter (aes (x=NIR_bndvi, y = LPredators), data= Data, alpha= 0.4, inherit.aes = FALSE, size= 4, show.legend = FALSE)
+  
+p.BNDVI.log <- p.BNDVI.log +  geom_ribbon(aes(x=BNDVI, ymin = Predicted.BCILowlog, ymax = Predicted.BCIHighlog,  y= Predicted.meanlog), alpha=0.3) +
+  xlab("BNDVI") + 
+  ylab("Log predatory arthropods (mg)") + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_line(colour = "black", size= 1.5), 
+                                                axis.title.x = element_text(size = 33, margin = margin(t = 5, r = 0, b = 0, l = 0)),
+                                                axis.title.y = element_text(size = 33, margin = margin(t = 0, r = 10, b = 0, l = 0)), 
+                                                axis.text = element_text(size= 27),  plot.margin = unit(c(0.5, 0.5, 1, 1), "cm"))
+
+```  
+
+**GDVI** Termino lineal (+) Termino cuadratico (-)
+```{r echo= FALSE}
+model.INLA.GDVI.Preda_SC$summary.fixed[, c("mean", "sd", "0.025quant", "0.975quant")]
+```    
+```{r}
+index.Cov <- inla.stack.index(All.stacks_Predators,
+                              tag = "Covariates")$data
+
+Predichos <- model.INLA.GDVI.Preda_SC$summary.fitted.values[index.Cov, c(1,3,5)]
+
+# Mean values
+Predicted.mean <- vector(length= 1000)
+Predicted.BCILow <- vector(length= 1000) 
+Predicted.BCIHigh <- vector(length= 1000)
+
+for(x in 1:1000){
+  items <- which(MyData$GDVI == unique(MyData$GDVI)[x])
+  Predicted.mean [x] <- mean(Predichos[items, 1])
+  Predicted.BCILow [x] <- mean(Predichos[items, 2])
+  Predicted.BCIHigh [x] <- mean(Predichos[items, 3])
+}
+
+# It is the second one we need as these are for the
+# artificial covariate values.
+# Add them to the MyData object.
+MyData1 <- data.frame (GDVI= unique(MyData$GDVI), Predicted.mean, Predicted.BCILow, Predicted.BCIHigh) 
+
+MyData1 <- rename(MyData1, 
+                  c("Predicted.mean" = "Predicted.meanlog", 
+                    "Predicted.BCILow" = "Predicted.BCILowlog",
+                    "Predicted.BCIHigh" = "Predicted.BCIHighlog"))
+MyData1$Predicted.mean <- exp(MyData1$Predicted.meanlog) - 1
+MyData1$Predicted.BCIHigh <- exp(MyData1$Predicted.BCIHighlog) -1
+MyData1$Predicted.BCILow <- exp(MyData1$Predicted.BCILowlog) -1
+
+p.GDVI <- ggplot(data=MyData1, aes(x=GDVI, ymin = Predicted.BCILow, ymax = Predicted.BCIHigh,  y= Predicted.mean)) + 
+  geom_line(size= 1) + 
+  geom_ribbon(alpha=0.3)
+
+p.GDVI <- p.GDVI +  geom_jitter (aes (x=NIR_gdvi, y = Predators), data= Data, alpha= 0.6, inherit.aes = FALSE, size= 4, show.legend = FALSE) +
+  xlab("GDVI") + 
+  ylab("") + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_line(colour = "black", size= 1.5), 
+                                                axis.title.x = element_text(size = 33, margin = margin(t = 5, r = 0, b = 0, l = 0)),
+                                                axis.title.y = element_text(size = 33, margin = margin(t = 0, r = 10, b = 0, l = 0)), 
+                                                axis.text = element_text(size= 27),  plot.margin = unit(c(0.5, 0.5, 1, 1), "cm"))
+
+```   
+
+
+```{r echo= FALSE}
+p.GDVI.log <- ggplot(data=MyData1, aes(x=GDVI, y= Predicted.meanlog)) + 
+  geom_line(size= 1.5) + 
+  geom_jitter (aes (x=NIR_gdvi, y = LPredators), data= Data, alpha= 0.4, inherit.aes = FALSE, size= 4, show.legend = FALSE)
+  
+p.GDVI.log <- p.GDVI.log +  geom_ribbon(aes(x=GDVI, ymin = Predicted.BCILowlog, ymax = Predicted.BCIHighlog,  y= Predicted.meanlog), alpha=0.3) +
+  xlab("GDVI") + 
+  ylab("") + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_line(colour = "black", size= 1.5), 
+                                                axis.title.x = element_text(size = 33, margin = margin(t = 5, r = 0, b = 0, l = 0)),
+                                                axis.title.y = element_text(size = 33, margin = margin(t = 0, r = 10, b = 0, l = 0)), 
+                                                axis.text = element_text(size= 27),  plot.margin = unit(c(0.5, 0.5, 1, 1), "cm"))
+
+```  
+
+**GIPVI** Termino lineal (+)
+```{r echo= FALSE}
+model.INLA.GIPVI.Preda_SC$summary.fixed[, c("mean", "sd", "0.025quant", "0.975quant")]
+```    
+
+
+**GNDVI**  Termino lineal (+)
+```{r echo= FALSE}
+model.INLA.GNDVI.Preda_SC$summary.fixed[, c("mean", "sd", "0.025quant", "0.975quant")]
+```   
+
+
+**GRVI** Termino lineal (+)
+```{r echo= FALSE}
+model.INLA.GRVI.Preda_SC$summary.fixed[, c("mean", "sd", "0.025quant", "0.975quant")]
+```    
+
+
+**GSAVI**  Termino lineal (+)
+```{r echo= FALSE}
+model.INLA.GSAVI.Preda_SC$summary.fixed[, c("mean", "sd", "0.025quant", "0.975quant")]
+```   
+   
+**NDVI**  No Effect
+```{r echo= FALSE}
+model.INLA.NDVI.Preda_SC$summary.fixed[, c("mean", "sd", "0.025quant", "0.975quant")]
+``` 
+ 
+
+### **Paso 6**. Especificar la formula del modelo en terminos de la variables respuesta, covariables y el termino de autocorrelacion espacial.
+
+Para establecer restricciones en la componente en la espacial necesitamos lo siguiente:
+```{r}
+XGIPVI <- data.frame(Intercept= Xm[,1], Year2018= Xm[,2], Year2019= Xm[,3], SeasonSpring= Xm[,4], SeasonSummer= Xm[,5], SeasonWinter= Xm[,6],
+                     GIPVI = scale(Xm[,16]))
+XGNDVI <- data.frame(Intercept= Xm[,1], Year2018= Xm[,2], Year2019= Xm[,3], SeasonSpring= Xm[,4], SeasonSummer= Xm[,5], SeasonWinter= Xm[,6],
+                     GNDVI = scale(Xm[,19]))
+XGRVI <- data.frame(Intercept= Xm[,1], Year2018= Xm[,2], Year2019= Xm[,3], SeasonSpring= Xm[,4], SeasonSummer= Xm[,5], SeasonWinter= Xm[,6],
+                     GRVI = scale(Xm[,22]))
+XGSAVI <- data.frame(Intercept= Xm[,1], Year2018= Xm[,2], Year2019= Xm[,3], SeasonSpring= Xm[,4], SeasonSummer= Xm[,5], SeasonWinter= Xm[,6],
+                    GSAVI = scale(Xm[,25]))
+XNDVI <- data.frame(Intercept= Xm[,1], Year2018= Xm[,2], Year2019= Xm[,3], SeasonSpring= Xm[,4], SeasonSummer= Xm[,5], SeasonWinter= Xm[,6],
+                    NDVI = scale(Xm[,7]))
+
+Qfact.GIPVI = qr.Q(qr(XGIPVI))
+Qfact.GNDVI = qr.Q(qr(XGNDVI))
+Qfact.GRVI = qr.Q(qr(XGRVI))
+Qfact.GSAVI = qr.Q(qr(XGSAVI))
+Qfact.NDVI = qr.Q(qr(XNDVI))
+
+```
+
+Describimos las ecuaciones de los modelos. Inicialmente testamos el efecto de los términos lineal y cuadrático. No obstante, si el término cuadrático no tuvo efecto, se borró de la ecuación.
+
+```{r}
+f3.GIPVI <- y ~ -1 + Intercept + Year2018 + Year2019 + SeasonSpring + SeasonSummer + SeasonWinter +  scale(GIPVI) +
+  f(w, model = spde, extraconstr = list(A = as.matrix(t(Qfact.GIPVI)%*%A2), e= rep(0,n.covariates)))
+
+f3.GNDVI <- y ~ -1 + Intercept + Year2018 + Year2019 + SeasonSpring + SeasonSummer + SeasonWinter +  scale(GNDVI) +
+  f(w, model = spde, extraconstr = list(A = as.matrix(t(Qfact.GNDVI)%*%A2), e= rep(0,n.covariates)))
+
+f3.GRVI <- y ~ -1 + Intercept + Year2018 + Year2019 + SeasonSpring + SeasonSummer + SeasonWinter + scale(GRVI) +
+  f(w, model = spde, extraconstr = list(A = as.matrix(t(Qfact.GRVI)%*%A2), e= rep(0,n.covariates)))
+
+f3.GSAVI <- y ~ -1 + Intercept + Year2018 + Year2019 + SeasonSpring + SeasonSummer + SeasonWinter +  scale(GSAVI) +
+  f(w, model = spde, extraconstr = list(A = as.matrix(t(Qfact.GSAVI)%*%A2), e= rep(0,n.covariates)))
+
+f3.NDVI <- y ~ -1 + Intercept + Year2018 + Year2019 + SeasonSpring + SeasonSummer + SeasonWinter +  scale(NDVI) +
+  f(w, model = spde, extraconstr = list(A = as.matrix(t(Qfact.NDVI)%*%A2), e= rep(0,n.covariates)))
+
+```
+
+
+### **Paso 7**. Correr el modelo en INLA
+
+Ajustamos los modelos para la **biomasa de predatory arthropods** y todos los indices de vegetacion:
+
+```{r}
+#*2* Analizando el efecto de los indices de vegetacion en la biomasa de epigeos
+# GIPVI
+model.INLA.GIPVI.Preda_SC <- inla(f3.GIPVI,
+                   family = "gaussian", 
+                   data = inla.stack.data(All.stacks_Predators),
+                   control.predictor = list(A = inla.stack.A(All.stacks_Predators), compute= TRUE),
+                   control.compute = list(waic= TRUE, dic= TRUE)) # Modelo Espacial
+
+# GNDVI
+model.INLA.GNDVI.Preda_SC <- inla(f3.GNDVI,
+                   family = "gaussian", 
+                   data = inla.stack.data(All.stacks_Predators),
+                   control.predictor = list(A = inla.stack.A(All.stacks_Predators), compute= TRUE),
+                   control.compute = list(waic= TRUE, dic= TRUE)) # Modelo Espacial
+
+# GRVI
+model.INLA.GRVI.Preda_SC <- inla(f3.GRVI,
+                   family = "gaussian", 
+                   data = inla.stack.data(All.stacks_Predators),
+                   control.predictor = list(A = inla.stack.A(All.stacks_Predators), compute= TRUE),
+                   control.compute = list(waic= TRUE, dic= TRUE)) # Modelo Espacial
+
+# GSAVI
+model.INLA.GSAVI.Preda_SC <- inla(f3.GSAVI,
+                   family = "gaussian", 
+                   data = inla.stack.data(All.stacks_Predators),
+                   control.predictor = list(A = inla.stack.A(All.stacks_Predators), compute= TRUE),
+                   control.compute = list(waic= TRUE, dic= TRUE)) # Modelo Espacial
+
+# NDVI
+model.INLA.NDVI.Preda_SC <- inla(f3.NDVI,
+                   family = "gaussian", 
+                   data = inla.stack.data(All.stacks_Predators),
+                   control.predictor = list(A = inla.stack.A(All.stacks_Predators), compute= TRUE),
+                   control.compute = list(waic= TRUE, dic= TRUE)) # Modelo Espacial
+
+```
+
+
+##### **Paso 8**. Explorar los resultados
+
+**GIPVI** Termino lineal (+)
+```{r echo= FALSE}
+model.INLA.GIPVI.Preda_SC$summary.fixed[, c("mean", "sd", "0.025quant", "0.975quant")]
+```    
+
+```{r}
+index.Cov <- inla.stack.index(All.stacks_Predators,
+                              tag = "Covariates")$data
+
+Predichos <- model.INLA.GIPVI.Preda_SC$summary.fitted.values[index.Cov, c(1,3,5)]
+
+# Mean values
+Predicted.mean <- vector(length= 1000)
+Predicted.BCILow <- vector(length= 1000) 
+Predicted.BCIHigh <- vector(length= 1000)
+
+for(x in 1:1000){
+  items <- which(MyData$GIPVI == unique(MyData$GIPVI)[x])
+  Predicted.mean [x] <- mean(Predichos[items, 1])
+  Predicted.BCILow [x] <- mean(Predichos[items, 2])
+  Predicted.BCIHigh [x] <- mean(Predichos[items, 3])
+}
+
+# It is the second one we need as these are for the
+# artificial covariate values.
+# Add them to the MyData object.
+MyData1 <- data.frame (GIPVI= unique(MyData$GIPVI), Predicted.mean, Predicted.BCILow, Predicted.BCIHigh) 
+
+MyData1 <- rename(MyData1, 
+                  c("Predicted.mean" = "Predicted.meanlog", 
+                    "Predicted.BCILow" = "Predicted.BCILowlog",
+                    "Predicted.BCIHigh" = "Predicted.BCIHighlog"))
+MyData1$Predicted.mean <- exp(MyData1$Predicted.meanlog) - 1
+MyData1$Predicted.BCIHigh <- exp(MyData1$Predicted.BCIHighlog) -1
+MyData1$Predicted.BCILow <- exp(MyData1$Predicted.BCILowlog) -1
+
+p.GIPVI <- ggplot(data=MyData1, aes(x=GIPVI, ymin = Predicted.BCILow, ymax = Predicted.BCIHigh,  y= Predicted.mean)) + 
+  geom_line(size= 1) + 
+  geom_ribbon(alpha=0.3)
+
+p.GIPVI <- p.GIPVI +  geom_jitter (aes (x=NIR_gipvi, y = Predators), data= Data, alpha= 0.6, inherit.aes = FALSE, size= 4, show.legend = FALSE) +
+  xlab("GIPVI") + 
+  ylab("") + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_line(colour = "black", size= 1.5), 
+                                                axis.title.x = element_text(size = 33, margin = margin(t = 5, r = 0, b = 0, l = 0)),
+                                                axis.title.y = element_text(size = 33, margin = margin(t = 0, r = 10, b = 0, l = 0)), 
+                                                axis.text = element_text(size= 27),  plot.margin = unit(c(0.5, 0.5, 1, 1), "cm"))
+
+```   
+
+
+```{r echo= FALSE}
+p.GIPVI.log <- ggplot(data=MyData1, aes(x=GIPVI, y= Predicted.meanlog)) + 
+  geom_line(size= 1.5) + 
+  geom_jitter (aes (x=NIR_gipvi, y = LPredators), data= Data, alpha= 0.4, inherit.aes = FALSE, size= 4, show.legend = FALSE)
+  
+p.GIPVI.log <- p.GIPVI.log +  geom_ribbon(aes(x=GIPVI, ymin = Predicted.BCILowlog, ymax = Predicted.BCIHighlog,  y= Predicted.meanlog), alpha=0.3) +
+  xlab("GIPVI") + 
+  ylab("") + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_line(colour = "black", size= 1.5), 
+                                                axis.title.x = element_text(size = 33, margin = margin(t = 5, r = 0, b = 0, l = 0)),
+                                                axis.title.y = element_text(size = 33, margin = margin(t = 0, r = 10, b = 0, l = 0)), 
+                                                axis.text = element_text(size= 27),  plot.margin = unit(c(0.5, 0.5, 1, 1), "cm"))
+
+```  
+
+**GNDVI** Termino lineal (+)
+```{r echo= FALSE}
+model.INLA.GNDVI.Preda_SC$summary.fixed[, c("mean", "sd", "0.025quant", "0.975quant")]
+```   
+
+```{r}
+index.Cov <- inla.stack.index(All.stacks_Predators,
+                              tag = "Covariates")$data
+
+Predichos <- model.INLA.GNDVI.Preda_SC$summary.fitted.values[index.Cov, c(1,3,5)]
+
+# Mean values
+Predicted.mean <- vector(length= 1000)
+Predicted.BCILow <- vector(length= 1000) 
+Predicted.BCIHigh <- vector(length= 1000)
+
+for(x in 1:1000){
+  items <- which(MyData$GNDVI == unique(MyData$GNDVI)[x])
+  Predicted.mean [x] <- mean(Predichos[items, 1])
+  Predicted.BCILow [x] <- mean(Predichos[items, 2])
+  Predicted.BCIHigh [x] <- mean(Predichos[items, 3])
+}
+
+# It is the second one we need as these are for the
+# artificial covariate values.
+# Add them to the MyData object.
+MyData1 <- data.frame (GNDVI= unique(MyData$GNDVI), Predicted.mean, Predicted.BCILow, Predicted.BCIHigh) 
+
+MyData1 <- rename(MyData1, 
+                  c("Predicted.mean" = "Predicted.meanlog", 
+                    "Predicted.BCILow" = "Predicted.BCILowlog",
+                    "Predicted.BCIHigh" = "Predicted.BCIHighlog"))
+MyData1$Predicted.mean <- exp(MyData1$Predicted.meanlog) - 1
+MyData1$Predicted.BCIHigh <- exp(MyData1$Predicted.BCIHighlog) -1
+MyData1$Predicted.BCILow <- exp(MyData1$Predicted.BCILowlog) -1
+
+p.GNDVI <- ggplot(data=MyData1, aes(x=GNDVI, ymin = Predicted.BCILow, ymax = Predicted.BCIHigh,  y= Predicted.mean)) + 
+  geom_line(size= 1) + 
+  geom_ribbon(alpha=0.3)
+
+p.GNDVI <- p.GNDVI +  geom_jitter (aes (x=NIR_gndvi, y = Predators), data= Data, alpha= 0.6, inherit.aes = FALSE, size= 4, show.legend = FALSE) +
+  xlab("GNDVI") + 
+  ylab("Predatory arthropods (mg)") + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_line(colour = "black", size= 1.5), 
+                                                axis.title.x = element_text(size = 33, margin = margin(t = 5, r = 0, b = 0, l = 0)),
+                                                axis.title.y = element_text(size = 33, margin = margin(t = 0, r = 10, b = 0, l = 0)), 
+                                                axis.text = element_text(size= 27),  plot.margin = unit(c(0.5, 0.5, 1, 1), "cm"))
+
+```   
+
+
+```{r echo= FALSE}
+p.GNDVI.log <- ggplot(data=MyData1, aes(x=GNDVI, y= Predicted.meanlog)) + 
+  geom_line(size= 1.5) + 
+  geom_jitter (aes (x=NIR_gndvi, y = LPredators), data= Data, alpha= 0.4, inherit.aes = FALSE, size= 4, show.legend = FALSE)
+  
+p.GNDVI.log <- p.GNDVI.log +  geom_ribbon(aes(x=GNDVI, ymin = Predicted.BCILowlog, ymax = Predicted.BCIHighlog,  y= Predicted.meanlog), alpha=0.3) +
+  xlab("GNDVI") + 
+  ylab("Log predatory arthropods (mg)") + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_line(colour = "black", size= 1.5), 
+                                                axis.title.x = element_text(size = 33, margin = margin(t = 5, r = 0, b = 0, l = 0)),
+                                                axis.title.y = element_text(size = 33, margin = margin(t = 0, r = 10, b = 0, l = 0)), 
+                                                axis.text = element_text(size= 27),  plot.margin = unit(c(0.5, 0.5, 1, 1), "cm"))
+
+```  
+
+
+**GRVI**  Termino lineal (+)
+```{r echo= FALSE}
+model.INLA.GRVI.Preda_SC$summary.fixed[, c("mean", "sd", "0.025quant", "0.975quant")]
+```    
+
+```{r}
+index.Cov <- inla.stack.index(All.stacks_Predators,
+                              tag = "Covariates")$data
+
+Predichos <- model.INLA.GRVI.Preda_SC$summary.fitted.values[index.Cov, c(1,3,5)]
+
+# Mean values
+Predicted.mean <- vector(length= 1000)
+Predicted.BCILow <- vector(length= 1000) 
+Predicted.BCIHigh <- vector(length= 1000)
+
+for(x in 1:1000){
+  items <- which(MyData$GRVI == unique(MyData$GRVI)[x])
+  Predicted.mean [x] <- mean(Predichos[items, 1])
+  Predicted.BCILow [x] <- mean(Predichos[items, 2])
+  Predicted.BCIHigh [x] <- mean(Predichos[items, 3])
+}
+
+# It is the second one we need as these are for the
+# artificial covariate values.
+# Add them to the MyData object.
+MyData1 <- data.frame (GRVI= unique(MyData$GRVI), Predicted.mean, Predicted.BCILow, Predicted.BCIHigh) 
+
+MyData1 <- rename(MyData1, 
+                  c("Predicted.mean" = "Predicted.meanlog", 
+                    "Predicted.BCILow" = "Predicted.BCILowlog",
+                    "Predicted.BCIHigh" = "Predicted.BCIHighlog"))
+MyData1$Predicted.mean <- exp(MyData1$Predicted.meanlog) - 1
+MyData1$Predicted.BCIHigh <- exp(MyData1$Predicted.BCIHighlog) -1
+MyData1$Predicted.BCILow <- exp(MyData1$Predicted.BCILowlog) -1
+
+p.GRVI <- ggplot(data=MyData1, aes(x=GRVI, ymin = Predicted.BCILow, ymax = Predicted.BCIHigh,  y= Predicted.mean)) + 
+  geom_line(size= 1) + 
+  geom_ribbon(alpha=0.3)
+
+p.GRVI <- p.GRVI +  geom_jitter (aes (x=NIR_grvi, y = Predators), data= Data, alpha= 0.6, inherit.aes = FALSE, size= 4, show.legend = FALSE) +
+  xlab("GRVI") + 
+  ylab("") + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_line(colour = "black", size= 1.5), 
+                                                axis.title.x = element_text(size = 33, margin = margin(t = 5, r = 0, b = 0, l = 0)),
+                                                axis.title.y = element_text(size = 33, margin = margin(t = 0, r = 10, b = 0, l = 0)), 
+                                                axis.text = element_text(size= 27),  plot.margin = unit(c(0.5, 0.5, 1, 1), "cm"))
+
+```   
+
+
+```{r echo= FALSE}
+p.GRVI.log <- ggplot(data=MyData1, aes(x=GRVI, y= Predicted.meanlog)) + 
+  geom_line(size= 1.5) + 
+  geom_jitter (aes (x=NIR_grvi, y = LPredators), data= Data, alpha= 0.4, inherit.aes = FALSE, size= 4, show.legend = FALSE)
+  
+p.GRVI.log <- p.GRVI.log +  geom_ribbon(aes(x=GRVI, ymin = Predicted.BCILowlog, ymax = Predicted.BCIHighlog,  y= Predicted.meanlog), alpha=0.3) +
+  xlab("GRVI") + 
+  ylab("") + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_line(colour = "black", size= 1.5), 
+                                                axis.title.x = element_text(size = 33, margin = margin(t = 5, r = 0, b = 0, l = 0)),
+                                                axis.title.y = element_text(size = 33, margin = margin(t = 0, r = 10, b = 0, l = 0)), 
+                                                axis.text = element_text(size= 27),  plot.margin = unit(c(0.5, 0.5, 1, 1), "cm"))
+
+```  
+
+**GSAVI**  Termino lineal (+)
+```{r echo= FALSE}
+model.INLA.GSAVI.Preda_SC$summary.fixed[, c("mean", "sd", "0.025quant", "0.975quant")]
+```  
+
+```{r}
+index.Cov <- inla.stack.index(All.stacks_Predators,
+                              tag = "Covariates")$data
+
+Predichos <- model.INLA.GSAVI.Preda_SC$summary.fitted.values[index.Cov, c(1,3,5)]
+
+# Mean values
+Predicted.mean <- vector(length= 1000)
+Predicted.BCILow <- vector(length= 1000) 
+Predicted.BCIHigh <- vector(length= 1000)
+
+for(x in 1:1000){
+  items <- which(MyData$GSAVI == unique(MyData$GSAVI)[x])
+  Predicted.mean [x] <- mean(Predichos[items, 1])
+  Predicted.BCILow [x] <- mean(Predichos[items, 2])
+  Predicted.BCIHigh [x] <- mean(Predichos[items, 3])
+}
+
+# It is the second one we need as these are for the
+# artificial covariate values.
+# Add them to the MyData object.
+MyData1 <- data.frame (GSAVI= unique(MyData$GSAVI), Predicted.mean, Predicted.BCILow, Predicted.BCIHigh) 
+
+MyData1 <- rename(MyData1, 
+                  c("Predicted.mean" = "Predicted.meanlog", 
+                    "Predicted.BCILow" = "Predicted.BCILowlog",
+                    "Predicted.BCIHigh" = "Predicted.BCIHighlog"))
+MyData1$Predicted.mean <- exp(MyData1$Predicted.meanlog) - 1
+MyData1$Predicted.BCIHigh <- exp(MyData1$Predicted.BCIHighlog) -1
+MyData1$Predicted.BCILow <- exp(MyData1$Predicted.BCILowlog) -1
+
+p.GSAVI <- ggplot(data=MyData1, aes(x=GSAVI, ymin = Predicted.BCILow, ymax = Predicted.BCIHigh,  y= Predicted.mean)) + 
+  geom_line(size= 1) + 
+  geom_ribbon(alpha=0.3)
+
+p.GSAVI <- p.GSAVI +  geom_jitter (aes (x=NIR_gsavi, y = Predators), data= Data, alpha= 0.6, inherit.aes = FALSE, size= 4, show.legend = FALSE) +
+  xlab("GSAVI") + 
+  ylab("") + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_line(colour = "black", size= 1.5), 
+                                                axis.title.x = element_text(size = 33, margin = margin(t = 5, r = 0, b = 0, l = 0)),
+                                                axis.title.y = element_text(size = 33, margin = margin(t = 0, r = 10, b = 0, l = 0)), 
+                                                axis.text = element_text(size= 27),  plot.margin = unit(c(0.5, 0.5, 1, 1), "cm"))
+
+```   
+
+
+```{r echo= FALSE}
+p.GSAVI.log <- ggplot(data=MyData1, aes(x=GSAVI, y= Predicted.meanlog)) + 
+  geom_line(size= 1.5) + 
+  geom_jitter (aes (x=NIR_gsavi, y = LPredators), data= Data, alpha= 0.4, inherit.aes = FALSE, size= 4, show.legend = FALSE)
+  
+p.GSAVI.log <- p.GSAVI.log +  geom_ribbon(aes(x=GSAVI, ymin = Predicted.BCILowlog, ymax = Predicted.BCIHighlog,  y= Predicted.meanlog), alpha=0.3) +
+  xlab("GSAVI") + 
+  ylab("") + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_line(colour = "black", size= 1.5), 
+                                                axis.title.x = element_text(size = 33, margin = margin(t = 5, r = 0, b = 0, l = 0)),
+                                                axis.title.y = element_text(size = 33, margin = margin(t = 0, r = 10, b = 0, l = 0)), 
+                                                axis.text = element_text(size= 27),  plot.margin = unit(c(0.5, 0.5, 1, 1), "cm"))
+
+``` 
+
+
+**NDVI** No hay efecto
+```{r echo= FALSE}
+model.INLA.NDVI.Preda_SC$summary.fixed[, c("mean", "sd", "0.025quant", "0.975quant")]
+```   
+
+##### **Paso 9**. Representar los resultados conjuntamente:
+```{r, fig.width= 25, fig.height= 15}
+# create an apporpriate viewport.  Modify the dimensions and coordinates as needed
+plot_grid(p.BNDVI.log, p.ENDVI.log, p.GIPVI.log,
+          p.GNDVI.log, p.GRVI.log, p.GSAVI.log,
+          lables= c("A", "B", "C", "D"),
+          nrow= 2, ncol= 3)
+```
+    
+En escala natural:
+```{r, fig.width= 10, fig.height= 8, warning= FALSE}
+# create an apporpriate viewport.  Modify the dimensions and coordinates as needed
+plot_grid(p.BNDVI, p.ENDVI, p.GIPVI,
+          p.GNDVI, p.GRVI, p.GSAVI,
+          lables= c("A", "B", "C", "D"),
+          nrow= 2, ncol= 3)
+```     
+
+
+#### B. **Biomasa de Detritivore Arthropods**
+
+##### **Paso 7**. Correr el modelo en INLA
+
+Ajustamos los modelos para la **biomasa de detritivores** y todos los índices de vegetación:
+
+```{r}
+#*2* Analizando el efecto de los indices de vegetacion en la biomasa de epigeos
+# BNDVI
+model.INLA.BNDVI.Detri <- inla(f2.BNDVI,
+                   family = "gaussian", 
+                   data = inla.stack.data(All.stacks_Detritiveres),
+                   control.predictor = list(A = inla.stack.A(All.stacks_Detritiveres), compute= TRUE),
+                   control.compute = list(waic= TRUE, dic= TRUE)) # Modelo Espacial
+
+# ENDVI
+model.INLA.ENDVI.Detri <- inla(f2.ENDVI,
+                   family = "gaussian", 
+                   data = inla.stack.data(All.stacks_Detritiveres),
+                   control.predictor = list(A = inla.stack.A(All.stacks_Detritiveres), compute= TRUE),
+                   control.compute = list(waic= TRUE, dic= TRUE)) # Modelo Espacial
+
+# GDVI
+model.INLA.GDVI.Detri <- inla(f2.GDVI,
+                   family = "gaussian", 
+                   data = inla.stack.data(All.stacks_Detritiveres),
+                   control.predictor = list(A = inla.stack.A(All.stacks_Detritiveres), compute= TRUE),
+                   control.compute = list(waic= TRUE, dic= TRUE)) # Modelo Espacial
+
+# GIPVI
+model.INLA.GIPVI.Detri <- inla(f2.GIPVI,
+                   family = "gaussian", 
+                   data = inla.stack.data(All.stacks_Detritiveres),
+                   control.predictor = list(A = inla.stack.A(All.stacks_Detritiveres), compute= TRUE),
+                   control.compute = list(waic= TRUE, dic= TRUE)) # Modelo Espacial
+
+# GNDVI
+model.INLA.GNDVI.Detri <- inla(f2.GNDVI,
+                   family = "gaussian", 
+                   data = inla.stack.data(All.stacks_Detritiveres),
+                   control.predictor = list(A = inla.stack.A(All.stacks_Detritiveres), compute= TRUE),
+                   control.compute = list(waic= TRUE, dic= TRUE)) # Modelo Espacial
+
+# GRVI
+model.INLA.GRVI.Detri <- inla(f2.GRVI,
+                   family = "gaussian", 
+                   data = inla.stack.data(All.stacks_Detritiveres),
+                   control.predictor = list(A = inla.stack.A(All.stacks_Detritiveres), compute= TRUE),
+                   control.compute = list(waic= TRUE, dic= TRUE)) # Modelo Espacial
+
+# GSAVI
+model.INLA.GSAVI.Detri <- inla(f2.GSAVI,
+                   family = "gaussian", 
+                   data = inla.stack.data(All.stacks_Detritiveres),
+                   control.predictor = list(A = inla.stack.A(All.stacks_Detritiveres), compute= TRUE),
+                   control.compute = list(waic= TRUE, dic= TRUE)) # Modelo Espacial
+
+# NDVI
+model.INLA.NDVI.Detri <- inla(f2.NDVI,
+                   family = "gaussian", 
+                   data = inla.stack.data(All.stacks_Detritiveres),
+                   control.predictor = list(A = inla.stack.A(All.stacks_Detritiveres), compute= TRUE),
+                   control.compute = list(waic= TRUE, dic= TRUE)) # Modelo Espacial
+```
+
+
+##### **Paso 8**. Explorar los resultados
+
+**BNDVI** No efecto
+
+```{r}
+model.INLA.BNDVI.Detri$summary.fixed[, c("mean", "sd", "0.025quant", "0.975quant")]
+```  
+
+**ENDVI** No efecto
+
+```{r echo= FALSE}
+model.INLA.ENDVI.Detri$summary.fixed[, c("mean", "sd", "0.025quant", "0.975quant")]
+```  
+
+**GDVI**  No efecto
+
+```{r echo= FALSE}
+model.INLA.GDVI.Detri$summary.fixed[, c("mean", "sd", "0.025quant", "0.975quant")]
+```  
+
+
+**GIPVI**  No efecto
+
+
+```{r echo= FALSE}
+model.INLA.GIPVI.Detri$summary.fixed[, c("mean", "sd", "0.025quant", "0.975quant")]
+```  
+
+
+**GNDVI**  No efecto
+
+```{r echo= FALSE}
+model.INLA.GNDVI.Detri$summary.fixed[, c("mean", "sd", "0.025quant", "0.975quant")]
+```  
+
+
+**GRVI**  Termino cuadratico (+)
+
+```{r echo= FALSE}
+model.INLA.GRVI.Detri$summary.fixed[, c("mean", "sd", "0.025quant", "0.975quant")]
+```  
+
+
+**GSAVI**  No efecto
+
+```{r echo= FALSE}
+model.INLA.GSAVI.Detri$summary.fixed[, c("mean", "sd", "0.025quant", "0.975quant")]
+```  
+
+
+**NDVI**  No efecto
+
+```{r echo= FALSE}
+model.INLA.NDVI.Detri$summary.fixed[, c("mean", "sd", "0.025quant", "0.975quant")]
+```    
+
+##### **Paso 10**. Validacion del modelo ¿Existe spatial confounding?
+
+**A.** Obtenemos los interceptos aleatorios espaciales para cada observacion en cada uno de los modelos
+
+```{r}
+w.proj <- inla.mesh.projector(mesh, loc =  Loc)
+
+# u_i para cada modelo
+w.pm_BNDVI   <- inla.mesh.project(w.proj, model.INLA.BNDVI.Detri$summary.random$w$mean)
+w.pm_ENDVI   <- inla.mesh.project(w.proj, model.INLA.ENDVI.Detri$summary.random$w$mean)
+w.pm_GDVI   <- inla.mesh.project(w.proj, model.INLA.GDVI.Detri$summary.random$w$mean)
+w.pm_GIPVI   <- inla.mesh.project(w.proj, model.INLA.GIPVI.Detri$summary.random$w$mean)
+w.pm_GNDVI   <- inla.mesh.project(w.proj, model.INLA.GNDVI.Detri$summary.random$w$mean)
+w.pm_GRVI   <- inla.mesh.project(w.proj, model.INLA.GRVI.Detri$summary.random$w$mean)
+w.pm_GSAVI   <- inla.mesh.project(w.proj, model.INLA.GSAVI.Detri$summary.random$w$mean)
+w.pm_NDVI   <- inla.mesh.project(w.proj, model.INLA.NDVI.Detri$summary.random$w$mean)
+```
+
+**B.** Ajustamos un modelo enfrentando los valores del intercepto aleatorio espacial frente al factor fijo Type.
+
+En el caso del **BNDVI** observamos que existe 'Spatial Confounding'
+
+```{r}
+SCbndvi <- inla (w.pm_BNDVI ~ scale(BNDVI1) + scale(BNDVI2),
+               family= "gaussian",
+                data = X,
+                   control.compute = list(dic = TRUE, waic = TRUE)
+                    )
+SCbndvi$summary.fixed[, c("mean", "sd", "0.025quant", "0.975quant")]
+```   
+
+Ajustamos el modelo solo con el termino lineal y existe Spatial Confounding:
+```{r}
+# NDVI Modelo Espacial f(w, model= spde)
+f2.BNDVIb <- y ~ -1 + Intercept + Year2018 + Year2019 + SeasonSpring + SeasonSummer + SeasonWinter + scale(BNDVI) + f(w, model = spde)
+
+# ENDVI
+model.INLA.BNDVI.Detri <- inla(f2.BNDVIb,
+                   family = "gaussian", 
+                   data = inla.stack.data(All.stacks_Detritiveres),
+                   control.predictor = list(A = inla.stack.A(All.stacks_Detritiveres), compute= TRUE),
+                   control.compute = list(waic= TRUE, dic= TRUE)) # Modelo Espacial
+
+w.proj <- inla.mesh.projector(mesh, loc =  Loc)
+w.pm_BNDVI   <- inla.mesh.project(w.proj, model.INLA.BNDVI.Detri$summary.random$w$mean)
+
+SCbndvi <- inla (w.pm_BNDVI ~ scale(BNDVI),
+               family= "gaussian",
+                data = X,
+                   control.compute = list(dic = TRUE, waic = TRUE)
+                    )
+SCbndvi$summary.fixed[, c("mean", "sd", "0.025quant", "0.975quant")]
+```
+
+En el caso del **ENDVI** existe 'Spatial Confounding' con el término lineal y el cuadrático
+```{r echo= FALSE}
+SCendvi <- inla (w.pm_ENDVI ~ scale(ENDVI),
+               family= "gaussian",
+                data = X,
+                   control.compute = list(dic = TRUE, waic = TRUE)
+                    )
+SCendvi$summary.fixed[, c("mean", "sd", "0.025quant", "0.975quant")]
+```   
+
+En el caso del **GDVI** NO existe 'Spatial Confounding' con el término lineal
+
+```{r echo= FALSE}
+SCgdvi <- inla (w.pm_GDVI ~ scale(GDVI),
+               family= "gaussian",
+                data = X,
+                   control.compute = list(dic = TRUE, waic = TRUE)
+                    )
+SCgdvi$summary.fixed[, c("mean", "sd", "0.025quant", "0.975quant")]
+```   
+
+No ajustamos un modelo mas simple porque GDVI no entra en el PAPER.
+
+
+En el caso del **GIPVI** NO existe 'Spatial Confounding' con el término lineal
+
+```{r echo= FALSE}
+SCgipvi <- inla (w.pm_GIPVI ~ scale(GIPVI),
+               family= "gaussian",
+                data = X,
+                   control.compute = list(dic = TRUE, waic = TRUE)
+                    )
+SCgipvi$summary.fixed[, c("mean", "sd", "0.025quant", "0.975quant")]
+```   
+
+Ajustamos el modelo solo con el termino lineal y NO existe Spatial Confounding y NO hay efectos:
+```{r}
+# NDVI Modelo Espacial f(w, model= spde)
+f2.GIPVIb <- y ~ -1 + Intercept + Year2018 + Year2019 + SeasonSpring + SeasonSummer + SeasonWinter + scale(GIPVI) + f(w, model = spde)
+
+# ENDVI
+model.INLA.GIPVI.Detri <- inla(f2.GIPVIb,
+                   family = "gaussian", 
+                   data = inla.stack.data(All.stacks_Detritiveres),
+                   control.predictor = list(A = inla.stack.A(All.stacks_Detritiveres), compute= TRUE),
+                   control.compute = list(waic= TRUE, dic= TRUE)) # Modelo Espacial
+
+w.proj <- inla.mesh.projector(mesh, loc =  Loc)
+w.pm_GIPVI   <- inla.mesh.project(w.proj, model.INLA.GIPVI.Detri$summary.random$w$mean)
+
+SCgipvi <- inla (w.pm_GIPVI ~ scale(GIPVI),
+               family= "gaussian",
+                data = X,
+                   control.compute = list(dic = TRUE, waic = TRUE)
+                    )
+SCgipvi$summary.fixed[, c("mean", "sd", "0.025quant", "0.975quant")]
+model.INLA.GIPVI.Detri$summary.fixed[, c("mean", "sd", "0.025quant", "0.975quant")]
+```
+
+
+
+En el caso del **GNDVI** NO existe 'Spatial Confounding'
+
+```{r echo= FALSE}
+SCgndvi <- inla (w.pm_GNDVI ~ scale(GNDVI),
+               family= "gaussian",
+                data = X,
+                   control.compute = list(dic = TRUE, waic = TRUE)
+                    )
+SCgndvi$summary.fixed[, c("mean", "sd", "0.025quant", "0.975quant")]
+```   
+Ajustamos el modelo solo con el termino lineal y NO existe Spatial Confounding y NO hay efectos:
+```{r}
+# NDVI Modelo Espacial f(w, model= spde)
+f2.GNDVIb <- y ~ -1 + Intercept + Year2018 + Year2019 + SeasonSpring + SeasonSummer + SeasonWinter + scale(GNDVI) + f(w, model = spde)
+
+# ENDVI
+model.INLA.GNDVI.Detri <- inla(f2.GNDVIb,
+                   family = "gaussian", 
+                   data = inla.stack.data(All.stacks_Detritiveres),
+                   control.predictor = list(A = inla.stack.A(All.stacks_Detritiveres), compute= TRUE),
+                   control.compute = list(waic= TRUE, dic= TRUE)) # Modelo Espacial
+
+w.proj <- inla.mesh.projector(mesh, loc =  Loc)
+w.pm_GNDVI   <- inla.mesh.project(w.proj, model.INLA.GNDVI.Detri$summary.random$w$mean)
+
+SCgndvi <- inla (w.pm_GNDVI ~ scale(GNDVI),
+               family= "gaussian",
+                data = X,
+                   control.compute = list(dic = TRUE, waic = TRUE)
+                    )
+SCgndvi$summary.fixed[, c("mean", "sd", "0.025quant", "0.975quant")]
+model.INLA.GNDVI.Detri$summary.fixed[, c("mean", "sd", "0.025quant", "0.975quant")]
+```   
+
+
+En el caso del **GRVI** NO existe 'Spatial Confounding'
+
+```{r echo= FALSE}
+SCgrvi <- inla (w.pm_GRVI ~ scale(GRVI),
+               family= "gaussian",
+                data = X,
+                   control.compute = list(dic = TRUE, waic = TRUE)
+                    )
+SCgrvi$summary.fixed[, c("mean", "sd", "0.025quant", "0.975quant")]
+```    
+
+Ajustamos el modelo solo con el termino lineal y NO existe Spatial Confounding y NO hay efectos:
+```{r}
+# NDVI Modelo Espacial f(w, model= spde)
+f2.GRVIb <- y ~ -1 + Intercept + Year2018 + Year2019 + SeasonSpring + SeasonSummer + SeasonWinter + scale(GRVI) + f(w, model = spde)
+
+# ENDVI
+model.INLA.GRVI.Detri <- inla(f2.GRVIb,
+                   family = "gaussian", 
+                   data = inla.stack.data(All.stacks_Detritiveres),
+                   control.predictor = list(A = inla.stack.A(All.stacks_Detritiveres), compute= TRUE),
+                   control.compute = list(waic= TRUE, dic= TRUE)) # Modelo Espacial
+
+w.proj <- inla.mesh.projector(mesh, loc =  Loc)
+w.pm_GRVI   <- inla.mesh.project(w.proj, model.INLA.GRVI.Detri$summary.random$w$mean)
+
+SCgrvi <- inla (w.pm_GRVI ~ scale(GRVI),
+               family= "gaussian",
+                data = X,
+                   control.compute = list(dic = TRUE, waic = TRUE)
+                    )
+SCgrvi$summary.fixed[, c("mean", "sd", "0.025quant", "0.975quant")]
+model.INLA.GRVI.Detri$summary.fixed[, c("mean", "sd", "0.025quant", "0.975quant")]
+``` 
+
+En el caso del **GSAVI** NO existe 'Spatial Confounding'
+
+```{r echo= FALSE}
+SCgsavi <- inla (w.pm_GSAVI ~ scale(GSAVI),
+               family= "gaussian",
+                data = X,
+                   control.compute = list(dic = TRUE, waic = TRUE)
+                    )
+SCgsavi$summary.fixed[, c("mean", "sd", "0.025quant", "0.975quant")]
+```   
+
+Ajustamos el modelo solo con el termino lineal y NO existe Spatial Confounding y NO hay efectos:
+```{r}
+# NDVI Modelo Espacial f(w, model= spde)
+f2.GSAVIb <- y ~ -1 + Intercept + Year2018 + Year2019 + SeasonSpring + SeasonSummer + SeasonWinter + scale(GSAVI) + f(w, model = spde)
+
+# ENDVI
+model.INLA.GSAVI.Detri <- inla(f2.GSAVIb,
+                   family = "gaussian", 
+                   data = inla.stack.data(All.stacks_Detritiveres),
+                   control.predictor = list(A = inla.stack.A(All.stacks_Detritiveres), compute= TRUE),
+                   control.compute = list(waic= TRUE, dic= TRUE)) # Modelo Espacial
+
+w.proj <- inla.mesh.projector(mesh, loc =  Loc)
+w.pm_GSAVI   <- inla.mesh.project(w.proj, model.INLA.GSAVI.Detri$summary.random$w$mean)
+
+SCgsavi <- inla (w.pm_GSAVI ~ scale(GSAVI),
+               family= "gaussian",
+                data = X,
+                   control.compute = list(dic = TRUE, waic = TRUE)
+                    )
+SCgsavi$summary.fixed[, c("mean", "sd", "0.025quant", "0.975quant")]
+model.INLA.GSAVI.Detri$summary.fixed[, c("mean", "sd", "0.025quant", "0.975quant")]
+``` 
+
+En el caso del **NDVI** existe 'Spatial Confounding'.
+
+```{r echo= FALSE}
+SCndvi <- inla (w.pm_NDVI ~ scale(NDVI),
+               family= "gaussian",
+                data = X,
+                   control.compute = list(dic = TRUE, waic = TRUE)
+                    )
+SCndvi$summary.fixed[, c("mean", "sd", "0.025quant", "0.975quant")]
+```   
+
+Por lo tanto, lo que tenemos que hacer ahora es ajustar de nuevo los modelos estableciendo restricciones en la componente espacial! El Spatial confoundgin siempre se da con el termino lineal. Vamos a ello:
+
+### **Paso 6**. Especificar la formula del modelo en terminos de la variables respuesta, covariables y el termino de autocorrelacion espacial.
+
+Para establecer restricciones en la componente en la espacial necesitamos lo siguiente:
+```{r}
+XBNDVI <- data.frame(Intercept= Xm[,1], Year2018= Xm[,2], Year2019= Xm[,3], SeasonSpring= Xm[,4], SeasonSummer= Xm[,5], SeasonWinter= Xm[,6],
+                    BNDVI1 = scale(Xm[,29]), BNDVI2 = scale(Xm[,30]))
+XENDVI <- data.frame(Intercept= Xm[,1], Year2018= Xm[,2], Year2019= Xm[,3], SeasonSpring= Xm[,4], SeasonSummer= Xm[,5], SeasonWinter= Xm[,6],
+                    ENDVI1 = scale(Xm[,11]), ENDVI2 = scale(Xm[,12]))
+XNDVI <- data.frame(Intercept= Xm[,1], Year2018= Xm[,2], Year2019= Xm[,3], SeasonSpring= Xm[,4], SeasonSummer= Xm[,5], SeasonWinter= Xm[,6],
+                    NDVI1 = scale(Xm[,8]), NDVI2 = scale(Xm[,9]))
+
+n.covariates.poly= 8 # Intercepto + Year(2) + Month (3) + polinomico de cada indice de vegetacion (2)
+n.covariates= 7 # Intercepto + Year(2) + Month (3) + termino lineal de cada indice de vegetacion (1)
+
+Qfact.BNDVI = qr.Q(qr(XBNDVI))
+Qfact.ENDVI = qr.Q(qr(XENDVI))
+Qfact.NDVI = qr.Q(qr(XNDVI))
+```
+
+Describimos las ecuaciones de los modelos. Inicialmente testamos el efecto de los términos lineal y cuadrático. No obstante, si el término cuadrático no tuvo efecto, se borró de la ecuación.
+
+```{r}
+f3.BNDVI <- y ~ -1 + Intercept + Year2018 + Year2019 + SeasonSpring + SeasonSummer + SeasonWinter + scale(BNDVI1) +  scale(BNDVI2) + 
+  f(w, model = spde, extraconstr = list(A = as.matrix(t(Qfact.BNDVI)%*%A2), e= rep(0,n.covariates.poly)))
+
+f3.ENDVI <- y ~ -1 + Intercept + Year2018 + Year2019 + SeasonSpring + SeasonSummer + SeasonWinter +  scale(ENDVI1) +  scale(ENDVI2) + 
+  f(w, model = spde, extraconstr = list(A = as.matrix(t(Qfact.ENDVI)%*%A2), e= rep(0,n.covariates.poly)))
+
+f3.NDVI <- y ~ -1 + Intercept + Year2018 + Year2019 + SeasonSpring + SeasonSummer + SeasonWinter +  scale(NDVI1)  + scale(NDVI2)  +
+  f(w, model = spde, extraconstr = list(A = as.matrix(t(Qfact.NDVI)%*%A2), e= rep(0,n.covariates.poly)))
+
+```
+
+
+### **Paso 7**. Correr el modelo en INLA
+
+Ajustamos los modelos para la **biomasa de epigeos** y todos los indices de vegetacion:
+
+```{r}
+#*2* Analizando el efecto de los indices de vegetacion en la biomasa de epigeos
+# BNDVI
+model.INLA.BNDVI.Detri_SC <- inla(f3.BNDVI,
+                   family = "gaussian", 
+                   data = inla.stack.data(All.stacks_Detritiveres),
+                   control.predictor = list(A = inla.stack.A(All.stacks_Detritiveres), compute= TRUE),
+                   control.compute = list(waic= TRUE, dic= TRUE)) # Modelo Espacial
+
+# GDVI
+model.INLA.ENDVI.Detri_SC <- inla(f3.ENDVI,
+                   family = "gaussian", 
+                   data = inla.stack.data(All.stacks_Detritiveres),
+                   control.predictor = list(A = inla.stack.A(All.stacks_Detritiveres), compute= TRUE),
+                   control.compute = list(waic= TRUE, dic= TRUE)) # Modelo Espacial
+
+# NDVI
+model.INLA.NDVI.Detri_SC <- inla(f3.NDVI,
+                   family = "gaussian", 
+                   data = inla.stack.data(All.stacks_Detritiveres),
+                   control.predictor = list(A = inla.stack.A(All.stacks_Detritiveres), compute= TRUE),
+                   control.compute = list(waic= TRUE, dic= TRUE)) # Modelo Espacial
+
+```
+
+
+##### **Paso 8**. Explorar los resultados
+
+**BNDVI** Término cuadrático (+)
+
+```{r}
+model.INLA.BNDVI.Detri_SC$summary.fixed[, c("mean", "sd", "0.025quant", "0.975quant")]
+```  
+
+
+```{r}
+index.Cov <- inla.stack.index(All.stacks_Detritiveres,
+                              tag = "Covariates")$data
+
+Predichos <- model.INLA.BNDVI.Detri_SC$summary.fitted.values[index.Cov, c(1,3,5)]
+
+# Mean values
+Predicted.mean <- vector(length= 1000)
+Predicted.BCILow <- vector(length= 1000) 
+Predicted.BCIHigh <- vector(length= 1000)
+
+for(x in 1:1000){
+  items <- which(MyData$BNDVI == unique(MyData$BNDVI)[x])
+  Predicted.mean [x] <- mean(Predichos[items, 1])
+  Predicted.BCILow [x] <- mean(Predichos[items, 2])
+  Predicted.BCIHigh [x] <- mean(Predichos[items, 3])
+}
+
+# It is the second one we need as these are for the
+# artificial covariate values.
+# Add them to the MyData object.
+MyData1 <- data.frame (BNDVI= unique(MyData$BNDVI), Predicted.mean, Predicted.BCILow, Predicted.BCIHigh) 
+
+MyData1 <- rename(MyData1, 
+                  c("Predicted.mean" = "Predicted.meanlog", 
+                    "Predicted.BCILow" = "Predicted.BCILowlog",
+                    "Predicted.BCIHigh" = "Predicted.BCIHighlog"))
+MyData1$Predicted.mean <- exp(MyData1$Predicted.meanlog) - 1
+MyData1$Predicted.BCIHigh <- exp(MyData1$Predicted.BCIHighlog) -1
+MyData1$Predicted.BCILow <- exp(MyData1$Predicted.BCILowlog) -1
+
+p.BNDVI <- ggplot(data=MyData1, aes(x=BNDVI, ymin = Predicted.BCILow, ymax = Predicted.BCIHigh,  y= Predicted.mean)) + 
+  geom_line(size= 1) + 
+  geom_ribbon(alpha=0.3)
+
+p.BNDVI <- p.BNDVI +  geom_jitter (aes (x=NIR_bndvi, y = Detritiveres), data= Data, alpha= 0.6, inherit.aes = FALSE, size= 4, show.legend = FALSE) +
+  xlab("BNDVI") + 
+  ylab("Detritivore arthropodos (mg)") + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_line(colour = "black", size= 1.5), 
+                                                axis.title.x = element_text(size = 33, margin = margin(t = 5, r = 0, b = 0, l = 0)),
+                                                axis.title.y = element_text(size = 33, margin = margin(t = 0, r = 10, b = 0, l = 0)), 
+                                                axis.text = element_text(size= 27),  plot.margin = unit(c(0.5, 0.5, 1, 1), "cm"))
+
+```   
+
+
+```{r echo= FALSE}
+p.BNDVI.log <- ggplot(data=MyData1, aes(x=BNDVI, y= Predicted.meanlog)) + 
+  geom_line(size= 1.5) + 
+  geom_jitter (aes (x=NIR_bndvi, y = LDetritiveres), data= Data, alpha= 0.4, inherit.aes = FALSE, size= 4, show.legend = FALSE)
+  
+p.BNDVI.log <- p.BNDVI.log +  geom_ribbon(aes(x=BNDVI, ymin = Predicted.BCILowlog, ymax = Predicted.BCIHighlog,  y= Predicted.meanlog), alpha=0.5) +
+  xlab("BNDVI") + 
+  ylab("Log detritivore arthropods (mg)") + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_line(colour = "black", size= 1.5), 
+                                                axis.title.x = element_text(size = 33, margin = margin(t = 5, r = 0, b = 0, l = 0)),
+                                                axis.title.y = element_text(size = 33, margin = margin(t = 0, r = 10, b = 0, l = 0)), 
+                                                axis.text = element_text(size= 27),  plot.margin = unit(c(0.5, 0.5, 1, 1), "cm"))
+
+```  
+
+**ENDVI** Termino cuadratico (+)
+```{r echo= FALSE}
+model.INLA.ENDVI.Detri_SC$summary.fixed[, c("mean", "sd", "0.025quant", "0.975quant")]
+```    
+```{r}
+index.Cov <- inla.stack.index(All.stacks_Detritiveres,
+                              tag = "Covariates")$data
+
+Predichos <- model.INLA.ENDVI.Detri_SC$summary.fitted.values[index.Cov, c(1,3,5)]
+
+# Mean values
+Predicted.mean <- vector(length= 1000)
+Predicted.BCILow <- vector(length= 1000) 
+Predicted.BCIHigh <- vector(length= 1000)
+
+for(x in 1:1000){
+  items <- which(MyData$ENDVI == unique(MyData$ENDVI)[x])
+  Predicted.mean [x] <- mean(Predichos[items, 1])
+  Predicted.BCILow [x] <- mean(Predichos[items, 2])
+  Predicted.BCIHigh [x] <- mean(Predichos[items, 3])
+}
+
+# It is the second one we need as these are for the
+# artificial covariate values.
+# Add them to the MyData object.
+MyData1 <- data.frame (ENDVI= unique(MyData$ENDVI), Predicted.mean, Predicted.BCILow, Predicted.BCIHigh) 
+
+MyData1 <- rename(MyData1, 
+                  c("Predicted.mean" = "Predicted.meanlog", 
+                    "Predicted.BCILow" = "Predicted.BCILowlog",
+                    "Predicted.BCIHigh" = "Predicted.BCIHighlog"))
+MyData1$Predicted.mean <- exp(MyData1$Predicted.meanlog) - 1
+MyData1$Predicted.BCIHigh <- exp(MyData1$Predicted.BCIHighlog) -1
+MyData1$Predicted.BCILow <- exp(MyData1$Predicted.BCILowlog) -1
+
+p.ENDVI <- ggplot(data=MyData1, aes(x=ENDVI, ymin = Predicted.BCILow, ymax = Predicted.BCIHigh,  y= Predicted.mean)) + 
+  geom_line(size= 1) + 
+  geom_ribbon(alpha=0.3)
+
+p.ENDVI <- p.ENDVI +  geom_jitter (aes (x=NIR_endvi, y = Detritiveres), data= Data, alpha= 0.6, inherit.aes = FALSE, size= 4, show.legend = FALSE) +
+  xlab("ENDVI") + 
+  ylab("") + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_line(colour = "black", size= 1.5), 
+                                                axis.title.x = element_text(size = 33, margin = margin(t = 5, r = 0, b = 0, l = 0)),
+                                                axis.title.y = element_text(size = 33, margin = margin(t = 0, r = 10, b = 0, l = 0)), 
+                                                axis.text = element_text(size= 27),  plot.margin = unit(c(0.5, 0.5, 1, 1), "cm"))
+
+```   
+
+
+```{r echo= FALSE}
+p.ENDVI.log <- ggplot(data=MyData1, aes(x=ENDVI, y= Predicted.meanlog)) + 
+  geom_line(size= 1.5) + 
+  geom_jitter (aes (x=NIR_endvi, y = LDetritiveres), data= Data, alpha= 0.4, inherit.aes = FALSE, size= 4, show.legend = FALSE)
+  
+p.ENDVI.log <- p.ENDVI.log +  geom_ribbon(aes(x=ENDVI, ymin = Predicted.BCILowlog, ymax = Predicted.BCIHighlog,  y= Predicted.meanlog), alpha=0.5) +
+  xlab("ENDVI") + 
+  ylab("") + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_line(colour = "black", size= 1.5), 
+                                                axis.title.x = element_text(size = 33, margin = margin(t = 5, r = 0, b = 0, l = 0)),
+                                                axis.title.y = element_text(size = 33, margin = margin(t = 0, r = 10, b = 0, l = 0)), 
+                                                axis.text = element_text(size= 27),  plot.margin = unit(c(0.5, 0.5, 1, 1), "cm"))
+
+```  
+
+**NDVI**  No Effect
+```{r echo= FALSE}
+model.INLA.NDVI.Detri_SC$summary.fixed[, c("mean", "sd", "0.025quant", "0.975quant")]
+``` 
+ 
+
+### **Paso 6**. Especificar la formula del modelo en terminos de la variables respuesta, covariables y el termino de autocorrelacion espacial.
+
+Para establecer restricciones en la componente en la espacial necesitamos lo siguiente:
+```{r}
+XBNDVI <- data.frame(Intercept= Xm[,1], Year2018= Xm[,2], Year2019= Xm[,3], SeasonSpring= Xm[,4], SeasonSummer= Xm[,5], SeasonWinter= Xm[,6],
+                     BNDVI = scale(Xm[,28]))
+XENDVI <- data.frame(Intercept= Xm[,1], Year2018= Xm[,2], Year2019= Xm[,3], SeasonSpring= Xm[,4], SeasonSummer= Xm[,5], SeasonWinter= Xm[,6],
+                     GNDVI = scale(Xm[,10]))
+XNDVI <- data.frame(Intercept= Xm[,1], Year2018= Xm[,2], Year2019= Xm[,3], SeasonSpring= Xm[,4], SeasonSummer= Xm[,5], SeasonWinter= Xm[,6],
+                    NDVI = scale(Xm[,7]))
+
+Qfact.BNDVI = qr.Q(qr(XBNDVI))
+Qfact.ENDVI = qr.Q(qr(XENDVI))
+Qfact.NDVI = qr.Q(qr(XNDVI))
+
+```
+
+Describimos las ecuaciones de los modelos. Inicialmente testamos el efecto de los términos lineal y cuadrático. No obstante, si el término cuadrático no tuvo efecto, se borró de la ecuación.
+
+```{r}
+f3.BNDVI <- y ~ -1 + Intercept + Year2018 + Year2019 + SeasonSpring + SeasonSummer + SeasonWinter +  scale(BNDVI) +
+  f(w, model = spde, extraconstr = list(A = as.matrix(t(Qfact.BNDVI)%*%A2), e= rep(0,n.covariates)))
+
+f3.ENDVI <- y ~ -1 + Intercept + Year2018 + Year2019 + SeasonSpring + SeasonSummer + SeasonWinter +  scale(ENDVI) +
+  f(w, model = spde, extraconstr = list(A = as.matrix(t(Qfact.ENDVI)%*%A2), e= rep(0,n.covariates)))
+
+f3.NDVI <- y ~ -1 + Intercept + Year2018 + Year2019 + SeasonSpring + SeasonSummer + SeasonWinter +  scale(NDVI) +
+  f(w, model = spde, extraconstr = list(A = as.matrix(t(Qfact.NDVI)%*%A2), e= rep(0,n.covariates)))
+
+```
+
+
+### **Paso 7**. Correr el modelo en INLA
+
+Ajustamos los modelos para la **biomasa de predatory arthropods** y todos los indices de vegetacion:
+
+```{r}
+#*2* Analizando el efecto de los indices de vegetacion en la biomasa de epigeos
+# BNDVI
+model.INLA.BNDVI.Detri_SC <- inla(f3.BNDVI,
+                   family = "gaussian", 
+                   data = inla.stack.data(All.stacks_Detritiveres),
+                   control.predictor = list(A = inla.stack.A(All.stacks_Detritiveres), compute= TRUE),
+                   control.compute = list(waic= TRUE, dic= TRUE)) # Modelo Espacial
+
+# ENDVI
+model.INLA.ENDVI.Detri_SC <- inla(f3.ENDVI,
+                   family = "gaussian", 
+                   data = inla.stack.data(All.stacks_Detritiveres),
+                   control.predictor = list(A = inla.stack.A(All.stacks_Detritiveres), compute= TRUE),
+                   control.compute = list(waic= TRUE, dic= TRUE)) # Modelo Espacial
+
+# NDVI
+model.INLA.NDVI.Detri_SC <- inla(f3.NDVI,
+                   family = "gaussian", 
+                   data = inla.stack.data(All.stacks_Detritiveres),
+                   control.predictor = list(A = inla.stack.A(All.stacks_Detritiveres), compute= TRUE),
+                   control.compute = list(waic= TRUE, dic= TRUE)) # Modelo Espacial
+
+```
+
+
+##### **Paso 8**. Explorar los resultados
+
+**BNDVI** Termino lineal (+)
+```{r echo= FALSE}
+model.INLA.BNDVI.Detri_SC$summary.fixed[, c("mean", "sd", "0.025quant", "0.975quant")]
+```    
+
+
+**ENDVI** Termino lineal (+)
+```{r echo= FALSE}
+model.INLA.ENDVI.Detri_SC$summary.fixed[, c("mean", "sd", "0.025quant", "0.975quant")]
+```   
+
+ 
+**NDVI** No hay efecto
+```{r echo= FALSE}
+model.INLA.NDVI.Detri_SC$summary.fixed[, c("mean", "sd", "0.025quant", "0.975quant")]
+```   
+
+##### **Paso 9**. Representar los resultados conjuntamente:
+```{r, fig.width= 23, fig.height= 8}
+# create an apporpriate viewport.  Modify the dimensions and coordinates as needed
+plot_grid(p.BNDVI.log, p.ENDVI.log,
+          lables= c("A", "B"),
+          nrow= 1, ncol= 2)
+```
+    
+En escala natural:
+```{r, fig.width= 23, fig.height= 8}
+# create an apporpriate viewport.  Modify the dimensions and coordinates as needed
+plot_grid(p.BNDVI, p.ENDVI,
+          lables= c("A", "B"),
+          nrow= 1, ncol= 2)
+```     
+
+#### C. **Biomasa de Phytophagous Arthropods**
+
+##### **Paso 7**. Correr el modelo en INLA
+
+Ajustamos los modelos para la **biomasa de phytophagous** y todos los índices de vegetación:
+
+```{r}
+#*2* Analizando el efecto de los indices de vegetacion en la biomasa de epigeos
+# BNDVI
+model.INLA.BNDVI.Phyto <- inla(f2.BNDVI,
+                   family = "gaussian", 
+                   data = inla.stack.data(All.stacks_Phytophagous),
+                   control.predictor = list(A = inla.stack.A(All.stacks_Phytophagous), compute= TRUE),
+                   control.compute = list(waic= TRUE, dic= TRUE)) # Modelo Espacial
+
+# ENDVI
+model.INLA.ENDVI.Phyto <- inla(f2.ENDVI,
+                   family = "gaussian", 
+                   data = inla.stack.data(All.stacks_Phytophagous),
+                   control.predictor = list(A = inla.stack.A(All.stacks_Phytophagous), compute= TRUE),
+                   control.compute = list(waic= TRUE, dic= TRUE)) # Modelo Espacial
+
+# GDVI
+model.INLA.GDVI.Phyto <- inla(f2.GDVI,
+                   family = "gaussian", 
+                   data = inla.stack.data(All.stacks_Phytophagous),
+                   control.predictor = list(A = inla.stack.A(All.stacks_Phytophagous), compute= TRUE),
+                   control.compute = list(waic= TRUE, dic= TRUE)) # Modelo Espacial
+
+# GIPVI
+model.INLA.GIPVI.Phyto <- inla(f2.GIPVI,
+                   family = "gaussian", 
+                   data = inla.stack.data(All.stacks_Phytophagous),
+                   control.predictor = list(A = inla.stack.A(All.stacks_Phytophagous), compute= TRUE),
+                   control.compute = list(waic= TRUE, dic= TRUE)) # Modelo Espacial
+
+# GNDVI
+model.INLA.GNDVI.Phyto <- inla(f2.GNDVI,
+                   family = "gaussian", 
+                   data = inla.stack.data(All.stacks_Phytophagous),
+                   control.predictor = list(A = inla.stack.A(All.stacks_Phytophagous), compute= TRUE),
+                   control.compute = list(waic= TRUE, dic= TRUE)) # Modelo Espacial
+
+# GRVI
+model.INLA.GRVI.Phyto <- inla(f2.GRVI,
+                   family = "gaussian", 
+                   data = inla.stack.data(All.stacks_Phytophagous),
+                   control.predictor = list(A = inla.stack.A(All.stacks_Phytophagous), compute= TRUE),
+                   control.compute = list(waic= TRUE, dic= TRUE)) # Modelo Espacial
+
+# GSAVI
+model.INLA.GSAVI.Phyto <- inla(f2.GSAVI,
+                   family = "gaussian", 
+                   data = inla.stack.data(All.stacks_Phytophagous),
+                   control.predictor = list(A = inla.stack.A(All.stacks_Phytophagous), compute= TRUE),
+                   control.compute = list(waic= TRUE, dic= TRUE)) # Modelo Espacial
+
+# NDVI
+model.INLA.NDVI.Phyto <- inla(f2.NDVI,
+                   family = "gaussian", 
+                   data = inla.stack.data(All.stacks_Phytophagous),
+                   control.predictor = list(A = inla.stack.A(All.stacks_Phytophagous), compute= TRUE),
+                   control.compute = list(waic= TRUE, dic= TRUE)) # Modelo Espacial
+```
+
+
+##### **Paso 8**. Explorar los resultados
+
+**BNDVI** No efecto
+
+```{r}
+model.INLA.BNDVI.Phyto$summary.fixed[, c("mean", "sd", "0.025quant", "0.975quant")]
+```  
+
+**ENDVI** No efecto
+
+```{r echo= FALSE}
+model.INLA.ENDVI.Phyto$summary.fixed[, c("mean", "sd", "0.025quant", "0.975quant")]
+```  
+
+**GDVI**  No efecto
+
+```{r echo= FALSE}
+model.INLA.GDVI.Phyto$summary.fixed[, c("mean", "sd", "0.025quant", "0.975quant")]
+```  
+
+
+**GIPVI**  Termino lineal (-)
+
+```{r echo= FALSE}
+model.INLA.GIPVI.Phyto$summary.fixed[, c("mean", "sd", "0.025quant", "0.975quant")]
+```  
+
+
+**GNDVI**  Termino lineal (-)
+
+```{r echo= FALSE}
+model.INLA.GNDVI.Phyto$summary.fixed[, c("mean", "sd", "0.025quant", "0.975quant")]
+```  
+
+
+**GRVI**  Termino lineal (-)
+
+```{r echo= FALSE}
+model.INLA.GRVI.Phyto$summary.fixed[, c("mean", "sd", "0.025quant", "0.975quant")]
+```  
+
+
+**GSAVI**  Termino lineal (-)
+
+```{r echo= FALSE}
+model.INLA.GSAVI.Phyto$summary.fixed[, c("mean", "sd", "0.025quant", "0.975quant")]
+```  
+
+
+**NDVI**  Termino lineal (-)
+
+```{r echo= FALSE}
+model.INLA.NDVI.Phyto$summary.fixed[, c("mean", "sd", "0.025quant", "0.975quant")]
+```    
+
+##### **Paso 10**. Validacion del modelo ¿Existe spatial confounding?
+
+**A.** Obtenemos los interceptos aleatorios espaciales para cada observacion en cada uno de los modelos
+
+```{r}
+w.proj <- inla.mesh.projector(mesh, loc =  Loc)
+
+# u_i para cada modelo
+w.pm_BNDVI   <- inla.mesh.project(w.proj, model.INLA.BNDVI.Phyto$summary.random$w$mean)
+w.pm_ENDVI   <- inla.mesh.project(w.proj, model.INLA.ENDVI.Phyto$summary.random$w$mean)
+w.pm_GDVI   <- inla.mesh.project(w.proj, model.INLA.GDVI.Phyto$summary.random$w$mean)
+w.pm_GIPVI   <- inla.mesh.project(w.proj, model.INLA.GIPVI.Phyto$summary.random$w$mean)
+w.pm_GNDVI   <- inla.mesh.project(w.proj, model.INLA.GNDVI.Phyto$summary.random$w$mean)
+w.pm_GRVI   <- inla.mesh.project(w.proj, model.INLA.GRVI.Phyto$summary.random$w$mean)
+w.pm_GSAVI   <- inla.mesh.project(w.proj, model.INLA.GSAVI.Phyto$summary.random$w$mean)
+w.pm_NDVI   <- inla.mesh.project(w.proj, model.INLA.NDVI.Phyto$summary.random$w$mean)
+```
+
+**B.** Ajustamos un modelo enfrentando los valores del intercepto aleatorio espacial frente al factor fijo Type.
+
+En el caso del **BNDVI** observamos que existe 'Spatial Confounding'
+
+```{r}
+SCbndvi <- inla (w.pm_BNDVI ~ scale(BNDVI),
+               family= "gaussian",
+                data = X,
+                   control.compute = list(dic = TRUE, waic = TRUE)
+                    )
+SCbndvi$summary.fixed[, c("mean", "sd", "0.025quant", "0.975quant")]
+```   
+
+En el caso del **ENDVI** existe 'Spatial Confounding'
+```{r echo= FALSE}
+SCendvi <- inla (w.pm_ENDVI ~ scale(ENDVI),
+               family= "gaussian",
+                data = X,
+                   control.compute = list(dic = TRUE, waic = TRUE)
+                    )
+SCendvi$summary.fixed[, c("mean", "sd", "0.025quant", "0.975quant")]
+```   
+
+En el caso del **GDVI** NO existe 'Spatial Confounding' con el término lineal
+
+```{r echo= FALSE}
+SCgdvi <- inla (w.pm_GDVI ~ scale(GDVI),
+               family= "gaussian",
+                data = X,
+                   control.compute = list(dic = TRUE, waic = TRUE)
+                    )
+SCgdvi$summary.fixed[, c("mean", "sd", "0.025quant", "0.975quant")]
+```   
+
+No ajustamos un modelo mas simple porque GDVI no entra en el PAPER.
+
+
+En el caso del **GIPVI** existe 'Spatial Confounding' con el término lineal
+
+```{r echo= FALSE}
+SCgipvi <- inla (w.pm_GIPVI ~ scale(GIPVI),
+               family= "gaussian",
+                data = X,
+                   control.compute = list(dic = TRUE, waic = TRUE)
+                    )
+SCgipvi$summary.fixed[, c("mean", "sd", "0.025quant", "0.975quant")]
+```   
+
+En el caso del **GNDVI** existe 'Spatial Confounding'
+
+```{r echo= FALSE}
+SCgndvi <- inla (w.pm_GNDVI ~ scale(GNDVI),
+               family= "gaussian",
+                data = X,
+                   control.compute = list(dic = TRUE, waic = TRUE)
+                    )
+SCgndvi$summary.fixed[, c("mean", "sd", "0.025quant", "0.975quant")]
+```   
+
+En el caso del **GRVI** existe 'Spatial Confounding'
+
+```{r echo= FALSE}
+SCgrvi <- inla (w.pm_GRVI ~ scale(GRVI),
+               family= "gaussian",
+                data = X,
+                   control.compute = list(dic = TRUE, waic = TRUE)
+                    )
+SCgrvi$summary.fixed[, c("mean", "sd", "0.025quant", "0.975quant")]
+```    
+
+
+En el caso del **GSAVI** existe 'Spatial Confounding'
+
+```{r echo= FALSE}
+SCgsavi <- inla (w.pm_GSAVI ~ scale(GSAVI),
+               family= "gaussian",
+                data = X,
+                   control.compute = list(dic = TRUE, waic = TRUE)
+                    )
+SCgsavi$summary.fixed[, c("mean", "sd", "0.025quant", "0.975quant")]
+```   
+
+
+En el caso del **NDVI** existe 'Spatial Confounding'.
+
+```{r echo= FALSE}
+SCndvi <- inla (w.pm_NDVI ~ scale(NDVI),
+               family= "gaussian",
+                data = X,
+                   control.compute = list(dic = TRUE, waic = TRUE)
+                    )
+SCndvi$summary.fixed[, c("mean", "sd", "0.025quant", "0.975quant")]
+```   
+
+Por lo tanto, lo que tenemos que hacer ahora es ajustar de nuevo los modelos estableciendo restricciones en la componente espacial! El Spatial confoundgin siempre se da con el termino lineal. Vamos a ello:
+
+### **Paso 6**. Especificar la formula del modelo en terminos de la variables respuesta, covariables y el termino de autocorrelacion espacial.
+
+Para establecer restricciones en la componente en la espacial necesitamos lo siguiente:
+```{r}
+XBNDVI <- data.frame(Intercept= Xm[,1], Year2018= Xm[,2], Year2019= Xm[,3], SeasonSpring= Xm[,4], SeasonSummer= Xm[,5], SeasonWinter= Xm[,6], BNDVI1 = scale(Xm[,29]), BNDVI2 = scale(Xm[,30]))
+
+XENDVI <- data.frame(Intercept= Xm[,1], Year2018= Xm[,2], Year2019= Xm[,3], SeasonSpring= Xm[,4], SeasonSummer= Xm[,5], SeasonWinter= Xm[,6], ENDVI1 = scale(Xm[,11]), ENDVI2 = scale(Xm[,12]))
+
+XGIPVI <- data.frame(Intercept= Xm[,1], Year2018= Xm[,2], Year2019= Xm[,3], SeasonSpring= Xm[,4], SeasonSummer= Xm[,5], SeasonWinter= Xm[,6],GIPVI1 = scale(Xm[,17]), GIPVI2 = scale(Xm[,18]))
+
+XGNDVI <- data.frame(Intercept= Xm[,1], Year2018= Xm[,2], Year2019= Xm[,3], SeasonSpring= Xm[,4], SeasonSummer= Xm[,5], SeasonWinter= Xm[,6], GNDVI1 = scale(Xm[,20]), GNDVI2 = scale(Xm[,21]))
+
+XGRVI <- data.frame(Intercept= Xm[,1], Year2018= Xm[,2], Year2019= Xm[,3], SeasonSpring= Xm[,4], SeasonSummer= Xm[,5], SeasonWinter= Xm[,6],GRVI1 = scale(Xm[,23]), GRVI2 = scale(Xm[,24]))
+
+XGSAVI <- data.frame(Intercept= Xm[,1], Year2018= Xm[,2], Year2019= Xm[,3], SeasonSpring= Xm[,4], SeasonSummer= Xm[,5], SeasonWinter= Xm[,6], GSAVI1 = scale(Xm[,26]), GSAVI2 = scale(Xm[,27]))
+
+XNDVI <- data.frame(Intercept= Xm[,1], Year2018= Xm[,2], Year2019= Xm[,3], SeasonSpring= Xm[,4], SeasonSummer= Xm[,5], SeasonWinter= Xm[,6], NDVI1 = scale(Xm[,8]), NDVI2 = scale(Xm[,9]))
+
+n.covariates.poly= 8 # Intercepto + Year(2) + Month (3) + polinomico de cada indice de vegetacion (2)
+n.covariates= 7 # Intercepto + Year(2) + Month (3) + termino lineal de cada indice de vegetacion (1)
+
+Qfact.BNDVI = qr.Q(qr(XBNDVI))
+Qfact.ENDVI = qr.Q(qr(XENDVI))
+Qfact.GIPVI = qr.Q(qr(XGIPVI))
+Qfact.GNDVI = qr.Q(qr(XGNDVI))
+Qfact.GRVI = qr.Q(qr(XGRVI))
+Qfact.GSAVI = qr.Q(qr(XGSAVI))
+Qfact.NDVI = qr.Q(qr(XNDVI))
+```
+
+Describimos las ecuaciones de los modelos. Inicialmente testamos el efecto de los términos lineal y cuadrático. No obstante, si el término cuadrático no tuvo efecto, se borró de la ecuación.
+
+```{r}
+f3.BNDVI <- y ~ -1 + Intercept + Year2018 + Year2019 + SeasonSpring + SeasonSummer + SeasonWinter + scale(BNDVI1) +  scale(BNDVI2) + 
+  f(w, model = spde, extraconstr = list(A = as.matrix(t(Qfact.BNDVI)%*%A2), e= rep(0,n.covariates.poly)))
+
+f3.ENDVI <- y ~ -1 + Intercept + Year2018 + Year2019 + SeasonSpring + SeasonSummer + SeasonWinter +  scale(ENDVI1) +  scale(ENDVI2) + 
+  f(w, model = spde, extraconstr = list(A = as.matrix(t(Qfact.ENDVI)%*%A2), e= rep(0,n.covariates.poly)))
+
+f3.GIPVI <- y ~ -1 + Intercept + Year2018 + Year2019 + SeasonSpring + SeasonSummer + SeasonWinter +  scale(GIPVI1) + scale(GIPVI2) +
+  f(w, model = spde, extraconstr = list(A = as.matrix(t(Qfact.GIPVI)%*%A2), e= rep(0,n.covariates.poly)))
+
+f3.GNDVI <- y ~ -1 + Intercept + Year2018 + Year2019 + SeasonSpring + SeasonSummer + SeasonWinter +  scale(GNDVI1) + scale(GNDVI2) +
+  f(w, model = spde, extraconstr = list(A = as.matrix(t(Qfact.GNDVI)%*%A2), e= rep(0,n.covariates.poly)))
+
+f3.GRVI <- y ~ -1 + Intercept + Year2018 + Year2019 + SeasonSpring + SeasonSummer + SeasonWinter + scale(GRVI1) + scale(GRVI2) +
+  f(w, model = spde, extraconstr = list(A = as.matrix(t(Qfact.GRVI)%*%A2), e= rep(0,n.covariates.poly)))
+
+f3.GSAVI <- y ~ -1 + Intercept + Year2018 + Year2019 + SeasonSpring + SeasonSummer + SeasonWinter +  scale(GSAVI1) + scale(GSAVI2) +
+  f(w, model = spde, extraconstr = list(A = as.matrix(t(Qfact.GSAVI)%*%A2), e= rep(0,n.covariates.poly)))
+
+f3.NDVI <- y ~ -1 + Intercept + Year2018 + Year2019 + SeasonSpring + SeasonSummer + SeasonWinter +  scale(NDVI1)  + scale(NDVI2)  +
+  f(w, model = spde, extraconstr = list(A = as.matrix(t(Qfact.NDVI)%*%A2), e= rep(0,n.covariates.poly)))
+
+```
+
+
+### **Paso 7**. Correr el modelo en INLA
+
+Ajustamos los modelos para la **biomasa de epigeos** y todos los indices de vegetacion:
+
+```{r}
+#*2* Analizando el efecto de los indices de vegetacion en la biomasa de epigeos
+# BNDVI
+model.INLA.BNDVI.Phyto_SC <- inla(f3.BNDVI,
+                   family = "gaussian", 
+                   data = inla.stack.data(All.stacks_Phytophagous),
+                   control.predictor = list(A = inla.stack.A(All.stacks_Phytophagous), compute= TRUE),
+                   control.compute = list(waic= TRUE, dic= TRUE)) # Modelo Espacial
+# ENDVI
+model.INLA.ENDVI.Phyto_SC <- inla(f3.ENDVI,
+                   family = "gaussian", 
+                   data = inla.stack.data(All.stacks_Phytophagous),
+                   control.predictor = list(A = inla.stack.A(All.stacks_Phytophagous), compute= TRUE),
+                   control.compute = list(waic= TRUE, dic= TRUE)) # Modelo Espacial
+
+# GIPVI
+model.INLA.GIPVI.Phyto_SC <- inla(f3.GIPVI,
+                   family = "gaussian", 
+                   data = inla.stack.data(All.stacks_Phytophagous),
+                   control.predictor = list(A = inla.stack.A(All.stacks_Phytophagous), compute= TRUE),
+                   control.compute = list(waic= TRUE, dic= TRUE)) # Modelo Espacial
+
+# GNDVI
+model.INLA.GNDVI.Phyto_SC <- inla(f3.GNDVI,
+                   family = "gaussian", 
+                   data = inla.stack.data(All.stacks_Phytophagous),
+                   control.predictor = list(A = inla.stack.A(All.stacks_Phytophagous), compute= TRUE),
+                   control.compute = list(waic= TRUE, dic= TRUE)) # Modelo Espacial
+
+# GRVI
+model.INLA.GRVI.Phyto_SC <- inla(f3.GRVI,
+                   family = "gaussian", 
+                   data = inla.stack.data(All.stacks_Phytophagous),
+                   control.predictor = list(A = inla.stack.A(All.stacks_Phytophagous), compute= TRUE),
+                   control.compute = list(waic= TRUE, dic= TRUE)) # Modelo Espacial
+
+# GSAVI
+model.INLA.GSAVI.Phyto_SC <- inla(f3.GSAVI,
+                   family = "gaussian", 
+                   data = inla.stack.data(All.stacks_Phytophagous),
+                   control.predictor = list(A = inla.stack.A(All.stacks_Phytophagous), compute= TRUE),
+                   control.compute = list(waic= TRUE, dic= TRUE)) # Modelo Espacial
+
+# NDVI
+model.INLA.NDVI.Phyto_SC <- inla(f3.NDVI,
+                   family = "gaussian", 
+                   data = inla.stack.data(All.stacks_Phytophagous),
+                   control.predictor = list(A = inla.stack.A(All.stacks_Phytophagous), compute= TRUE),
+                   control.compute = list(waic= TRUE, dic= TRUE)) # Modelo Espacial
+
+```
+
+
+##### **Paso 8**. Explorar los resultados
+
+**BNDVI** No hay efecto
+
+```{r}
+model.INLA.BNDVI.Phyto_SC$summary.fixed[, c("mean", "sd", "0.025quant", "0.975quant")]
+```  
+
+**ENDVI** No hay efecto
+```{r echo= FALSE}
+model.INLA.ENDVI.Phyto_SC$summary.fixed[, c("mean", "sd", "0.025quant", "0.975quant")]
+```  
+
+**GIPVI** No hay efecto
+
+```{r}
+model.INLA.GIPVI.Phyto_SC$summary.fixed[, c("mean", "sd", "0.025quant", "0.975quant")]
+``` 
+
+
+**GNDVI** No hay efecto
+
+```{r}
+model.INLA.GNDVI.Phyto_SC$summary.fixed[, c("mean", "sd", "0.025quant", "0.975quant")]
+``` 
+
+
+**GRVI** No hay efecto
+
+```{r}
+model.INLA.GRVI.Phyto_SC$summary.fixed[, c("mean", "sd", "0.025quant", "0.975quant")]
+``` 
+
+
+**GSAVI** No hay efecto
+
+```{r}
+model.INLA.GSAVI.Phyto_SC$summary.fixed[, c("mean", "sd", "0.025quant", "0.975quant")]
+``` 
+
+
+**NDVI**  Termino Lineal (-)
+```{r echo= FALSE}
+model.INLA.NDVI.Phyto_SC$summary.fixed[, c("mean", "sd", "0.025quant", "0.975quant")]
+``` 
+ 
+
+### **Paso 6**. Especificar la formula del modelo en terminos de la variables respuesta, covariables y el termino de autocorrelacion espacial.
+
+Para establecer restricciones en la componente en la espacial necesitamos lo siguiente:
+```{r}
+XBNDVI <- data.frame(Intercept= Xm[,1], Year2018= Xm[,2], Year2019= Xm[,3], SeasonSpring= Xm[,4], SeasonSummer= Xm[,5], SeasonWinter= Xm[,6], BNDVI = scale(Xm[,28]))
+XENDVI <- data.frame(Intercept= Xm[,1], Year2018= Xm[,2], Year2019= Xm[,3], SeasonSpring= Xm[,4], SeasonSummer= Xm[,5], SeasonWinter= Xm[,6], ENDVI = scale(Xm[,10]))
+XNDVI <- data.frame(Intercept= Xm[,1], Year2018= Xm[,2], Year2019= Xm[,3], SeasonSpring= Xm[,4], SeasonSummer= Xm[,5], SeasonWinter= Xm[,6], NDVI = scale(Xm[,7]))
+XGIPVI <- data.frame(Intercept= Xm[,1], Year2018= Xm[,2], Year2019= Xm[,3], SeasonSpring= Xm[,4], SeasonSummer= Xm[,5], SeasonWinter= Xm[,6],GIPVI = scale(Xm[,16]))
+XGNDVI <- data.frame(Intercept= Xm[,1], Year2018= Xm[,2], Year2019= Xm[,3], SeasonSpring= Xm[,4], SeasonSummer= Xm[,5], SeasonWinter= Xm[,6], GNDVI = scale(Xm[,19]))
+XGRVI <- data.frame(Intercept= Xm[,1], Year2018= Xm[,2], Year2019= Xm[,3], SeasonSpring= Xm[,4], SeasonSummer= Xm[,5], SeasonWinter= Xm[,6],GRVI = scale(Xm[,22]))
+XGSAVI <- data.frame(Intercept= Xm[,1], Year2018= Xm[,2], Year2019= Xm[,3], SeasonSpring= Xm[,4], SeasonSummer= Xm[,5], SeasonWinter= Xm[,6], GSAVI = scale(Xm[,25]))
+
+
+n.covariates.poly= 8 # Intercepto + Year(2) + Month (3) + polinomico de cada indice de vegetacion (2)
+n.covariates= 7 # Intercepto + Year(2) + Month (3) + termino lineal de cada indice de vegetacion (1)
+
+Qfact.BNDVI = qr.Q(qr(XBNDVI))
+Qfact.ENDVI = qr.Q(qr(XENDVI))
+Qfact.GIPVI = qr.Q(qr(XGIPVI))
+Qfact.GNDVI = qr.Q(qr(XGNDVI))
+Qfact.GRVI = qr.Q(qr(XGRVI))
+Qfact.GSAVI = qr.Q(qr(XGSAVI))
+Qfact.NDVI = qr.Q(qr(XNDVI))
+```
+
+Describimos las ecuaciones de los modelos. Inicialmente testamos el efecto de los términos lineal y cuadrático. No obstante, si el término cuadrático no tuvo efecto, se borró de la ecuación.
+
+```{r}
+f3.BNDVI <- y ~ -1 + Intercept + Year2018 + Year2019 + SeasonSpring + SeasonSummer + SeasonWinter +  scale(BNDVI) +
+  f(w, model = spde, extraconstr = list(A = as.matrix(t(Qfact.BNDVI)%*%A2), e= rep(0,n.covariates)))
+
+f3.ENDVI <- y ~ -1 + Intercept + Year2018 + Year2019 + SeasonSpring + SeasonSummer + SeasonWinter +  scale(ENDVI) +
+  f(w, model = spde, extraconstr = list(A = as.matrix(t(Qfact.ENDVI)%*%A2), e= rep(0,n.covariates)))
+
+f3.GIPVI <- y ~ -1 + Intercept + Year2018 + Year2019 + SeasonSpring + SeasonSummer + SeasonWinter +  scale(GIPVI) +
+  f(w, model = spde, extraconstr = list(A = as.matrix(t(Qfact.GIPVI)%*%A2), e= rep(0,n.covariates)))
+
+f3.GNDVI <- y ~ -1 + Intercept + Year2018 + Year2019 + SeasonSpring + SeasonSummer + SeasonWinter +  scale(GNDVI) +
+  f(w, model = spde, extraconstr = list(A = as.matrix(t(Qfact.GNDVI)%*%A2), e= rep(0,n.covariates)))
+
+f3.GRVI <- y ~ -1 + Intercept + Year2018 + Year2019 + SeasonSpring + SeasonSummer + SeasonWinter + scale(GRVI) + 
+  f(w, model = spde, extraconstr = list(A = as.matrix(t(Qfact.GRVI)%*%A2), e= rep(0,n.covariates)))
+
+f3.GSAVI <- y ~ -1 + Intercept + Year2018 + Year2019 + SeasonSpring + SeasonSummer + SeasonWinter +  scale(GSAVI) +
+  f(w, model = spde, extraconstr = list(A = as.matrix(t(Qfact.GSAVI)%*%A2), e= rep(0,n.covariates)))
+
+f3.NDVI <- y ~ -1 + Intercept + Year2018 + Year2019 + SeasonSpring + SeasonSummer + SeasonWinter +  scale(NDVI) +
+  f(w, model = spde, extraconstr = list(A = as.matrix(t(Qfact.NDVI)%*%A2), e= rep(0,n.covariates)))
+
+```
+
+
+### **Paso 7**. Correr el modelo en INLA
+
+Ajustamos los modelos para la **biomasa de predatory arthropods** y todos los indices de vegetacion:
+
+```{r}
+#*2* Analizando el efecto de los indices de vegetacion en la biomasa de epigeos
+# BNDVI
+model.INLA.BNDVI.Phyto_SC <- inla(f3.BNDVI,
+                   family = "gaussian", 
+                   data = inla.stack.data(All.stacks_Phytophagous),
+                   control.predictor = list(A = inla.stack.A(All.stacks_Phytophagous), compute= TRUE),
+                   control.compute = list(waic= TRUE, dic= TRUE)) # Modelo Espacial
+
+# ENDVI
+model.INLA.ENDVI.Phyto_SC <- inla(f3.ENDVI,
+                   family = "gaussian", 
+                   data = inla.stack.data(All.stacks_Phytophagous),
+                   control.predictor = list(A = inla.stack.A(All.stacks_Phytophagous), compute= TRUE),
+                   control.compute = list(waic= TRUE, dic= TRUE)) # Modelo Espacial
+
+# GIPVI
+model.INLA.GIPVI.Phyto_SC <- inla(f3.GIPVI,
+                   family = "gaussian", 
+                   data = inla.stack.data(All.stacks_Phytophagous),
+                   control.predictor = list(A = inla.stack.A(All.stacks_Phytophagous), compute= TRUE),
+                   control.compute = list(waic= TRUE, dic= TRUE)) # Modelo Espacial
+
+# GNDVI
+model.INLA.GNDVI.Phyto_SC <- inla(f3.GNDVI,
+                   family = "gaussian", 
+                   data = inla.stack.data(All.stacks_Phytophagous),
+                   control.predictor = list(A = inla.stack.A(All.stacks_Phytophagous), compute= TRUE),
+                   control.compute = list(waic= TRUE, dic= TRUE)) # Modelo Espacial
+
+# GRVI
+model.INLA.GRVI.Phyto_SC <- inla(f3.GRVI,
+                   family = "gaussian", 
+                   data = inla.stack.data(All.stacks_Phytophagous),
+                   control.predictor = list(A = inla.stack.A(All.stacks_Phytophagous), compute= TRUE),
+                   control.compute = list(waic= TRUE, dic= TRUE)) # Modelo Espacial
+
+# GSAVI
+model.INLA.GSAVI.Phyto_SC <- inla(f3.GSAVI,
+                   family = "gaussian", 
+                   data = inla.stack.data(All.stacks_Phytophagous),
+                   control.predictor = list(A = inla.stack.A(All.stacks_Phytophagous), compute= TRUE),
+                   control.compute = list(waic= TRUE, dic= TRUE)) # Modelo Espacial
+
+
+# NDVI
+model.INLA.NDVI.Phyto_SC <- inla(f3.NDVI,
+                   family = "gaussian", 
+                   data = inla.stack.data(All.stacks_Phytophagous),
+                   control.predictor = list(A = inla.stack.A(All.stacks_Phytophagous), compute= TRUE),
+                   control.compute = list(waic= TRUE, dic= TRUE)) # Modelo Espacial
+
+```
+
+
+##### **Paso 8**. Explorar los resultados
+
+**BNDVI** No hay efecto
+```{r echo= FALSE}
+model.INLA.BNDVI.Phyto_SC$summary.fixed[, c("mean", "sd", "0.025quant", "0.975quant")]
+```    
+
+
+**ENDVI** No hay efecto
+```{r echo= FALSE}
+model.INLA.ENDVI.Phyto_SC$summary.fixed[, c("mean", "sd", "0.025quant", "0.975quant")]
+```   
+
+**GIPVI** No hay efecto
+```{r echo= FALSE}
+model.INLA.GIPVI.Phyto_SC$summary.fixed[, c("mean", "sd", "0.025quant", "0.975quant")]
+```  
+
+**GNDVI** No hay efecto
+```{r echo= FALSE}
+model.INLA.GNDVI.Phyto_SC$summary.fixed[, c("mean", "sd", "0.025quant", "0.975quant")]
+```  
+
+**GRVI** No hay efecto
+```{r echo= FALSE}
+model.INLA.GRVI.Phyto_SC$summary.fixed[, c("mean", "sd", "0.025quant", "0.975quant")]
+```  
+
+**GSAVI** No hay efecto
+```{r echo= FALSE}
+model.INLA.GSAVI.Phyto_SC$summary.fixed[, c("mean", "sd", "0.025quant", "0.975quant")]
+```  
+
+**NDVI** Termino lineal (-)
+```{r echo= FALSE}
+model.INLA.NDVI.Phyto_SC$summary.fixed[, c("mean", "sd", "0.025quant", "0.975quant")]
+```   
+
+```{r}
+index.Cov <- inla.stack.index(All.stacks_Phytophagous,
+                              tag = "Covariates")$data
+
+Predichos <- model.INLA.NDVI.Phyto_SC$summary.fitted.values[index.Cov, c(1,3,5)]
+
+# Mean values
+Predicted.mean <- vector(length= 1000)
+Predicted.BCILow <- vector(length= 1000) 
+Predicted.BCIHigh <- vector(length= 1000)
+
+for(x in 1:1000){
+  items <- which(MyData$NDVI == unique(MyData$NDVI)[x])
+  Predicted.mean [x] <- mean(Predichos[items, 1])
+  Predicted.BCILow [x] <- mean(Predichos[items, 2])
+  Predicted.BCIHigh [x] <- mean(Predichos[items, 3])
+}
+
+# It is the second one we need as these are for the
+# artificial covariate values.
+# Add them to the MyData object.
+MyData1 <- data.frame (NDVI= unique(MyData$NDVI), Predicted.mean, Predicted.BCILow, Predicted.BCIHigh) 
+
+MyData1 <- rename(MyData1, 
+                  c("Predicted.mean" = "Predicted.meanlog", 
+                    "Predicted.BCILow" = "Predicted.BCILowlog",
+                    "Predicted.BCIHigh" = "Predicted.BCIHighlog"))
+MyData1$Predicted.mean <- exp(MyData1$Predicted.meanlog) - 1
+MyData1$Predicted.BCIHigh <- exp(MyData1$Predicted.BCIHighlog) -1
+MyData1$Predicted.BCILow <- exp(MyData1$Predicted.BCILowlog) -1
+
+p.NDVI <- ggplot(data=MyData1, aes(x=NDVI, ymin = Predicted.BCILow, ymax = Predicted.BCIHigh,  y= Predicted.mean)) + 
+  geom_line(size= 1) + 
+  geom_ribbon(alpha=0.3)
+
+p.NDVI <- p.NDVI +  geom_jitter (aes (x=NIR_ndvi, y = Phytophagous), data= Data, alpha= 0.6, inherit.aes = FALSE, size= 4, show.legend = FALSE) +
+  xlab("NDVI") + 
+  ylab("Phytophagous (mg)") + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_line(colour = "black", size= 1.5), 
+                                                axis.title.x = element_text(size = 33, margin = margin(t = 5, r = 0, b = 0, l = 0)),
+                                                axis.title.y = element_text(size = 33, margin = margin(t = 0, r = 10, b = 0, l = 0)), 
+                                                axis.text = element_text(size= 27),  plot.margin = unit(c(0.5, 0.5, 1, 1), "cm"))
+
+```   
+
+
+```{r echo= FALSE, fig.height= 11}
+p.NDVI.log <- ggplot(data=MyData1, aes(x=NDVI, y= Predicted.meanlog)) + 
+  geom_line(size= 1.5) + 
+  geom_jitter (aes (x=NIR_ndvi, y = LPhytophagous), data= Data, alpha= 0.4, inherit.aes = FALSE, size= 4, show.legend = FALSE)
+  
+p.NDVI.log <- p.NDVI.log +  geom_ribbon(aes(x=NDVI, ymin = Predicted.BCILowlog, ymax = Predicted.BCIHighlog,  y= Predicted.meanlog), alpha=0.5) +
+  xlab("NDVI") + 
+  ylab("Log phytophagous arthropods (mg)") + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_line(colour = "black", size= 1.5), 
+                                                axis.title.x = element_text(size = 33, margin = margin(t = 5, r = 0, b = 0, l = 0)),
+                                                axis.title.y = element_text(size = 33, margin = margin(t = 0, r = 10, b = 0, l = 0)), 
+                                                axis.text = element_text(size= 27),  plot.margin = unit(c(0.5, 0.5, 1, 1), "cm"))
+p.NDVI.log
+```  
+
+
+
+##### **Paso 9**. Representar los resultados conjuntamente:
+```{r, fig.width= 10, fig.height= 8}
+# create an apporpriate viewport.  Modify the dimensions and coordinates as needed
+plot_grid(p.NDVI.log,
+          lables= c("A"),
+          nrow= 1, ncol= 1)
+```
+    
+En escala natural:
+```{r, fig.width= 10, fig.height= 8, warning= FALSE}
+# create an apporpriate viewport.  Modify the dimensions and coordinates as needed
+plot_grid(p.NDVI,
+          lables= c("A"),
+          nrow= 1, ncol= 1)
+```     
+
+
+#### D. **Biomasa de Diverse Arthropods**
+
+##### **Paso 7**. Correr el modelo en INLA
+
+Ajustamos los modelos para la **biomasa de diverse** y todos los índices de vegetación:
+
+```{r}
+#*2* Analizando el efecto de los indices de vegetacion en la biomasa de epigeos
+# BNDVI
+model.INLA.BNDVI.Diverse <- inla(f2.BNDVI,
+                   family = "gaussian", 
+                   data = inla.stack.data(All.stacks_Diverse),
+                   control.predictor = list(A = inla.stack.A(All.stacks_Diverse), compute= TRUE),
+                   control.compute = list(waic= TRUE, dic= TRUE)) # Modelo Espacial
+
+# ENDVI
+model.INLA.ENDVI.Diverse <- inla(f2.ENDVI,
+                   family = "gaussian", 
+                   data = inla.stack.data(All.stacks_Diverse),
+                   control.predictor = list(A = inla.stack.A(All.stacks_Diverse), compute= TRUE),
+                   control.compute = list(waic= TRUE, dic= TRUE)) # Modelo Espacial
+
+# GDVI
+model.INLA.GDVI.Diverse <- inla(f2.GDVI,
+                   family = "gaussian", 
+                   data = inla.stack.data(All.stacks_Diverse),
+                   control.predictor = list(A = inla.stack.A(All.stacks_Diverse), compute= TRUE),
+                   control.compute = list(waic= TRUE, dic= TRUE)) # Modelo Espacial
+
+# GIPVI
+model.INLA.GIPVI.Diverse <- inla(f2.GIPVI,
+                   family = "gaussian", 
+                   data = inla.stack.data(All.stacks_Diverse),
+                   control.predictor = list(A = inla.stack.A(All.stacks_Diverse), compute= TRUE),
+                   control.compute = list(waic= TRUE, dic= TRUE)) # Modelo Espacial
+
+# GNDVI
+model.INLA.GNDVI.Diverse <- inla(f2.GNDVI,
+                   family = "gaussian", 
+                   data = inla.stack.data(All.stacks_Diverse),
+                   control.predictor = list(A = inla.stack.A(All.stacks_Diverse), compute= TRUE),
+                   control.compute = list(waic= TRUE, dic= TRUE)) # Modelo Espacial
+
+# GRVI
+model.INLA.GRVI.Diverse <- inla(f2.GRVI,
+                   family = "gaussian", 
+                   data = inla.stack.data(All.stacks_Diverse),
+                   control.predictor = list(A = inla.stack.A(All.stacks_Diverse), compute= TRUE),
+                   control.compute = list(waic= TRUE, dic= TRUE)) # Modelo Espacial
+
+# GSAVI
+model.INLA.GSAVI.Diverse <- inla(f2.GSAVI,
+                   family = "gaussian", 
+                   data = inla.stack.data(All.stacks_Diverse),
+                   control.predictor = list(A = inla.stack.A(All.stacks_Diverse), compute= TRUE),
+                   control.compute = list(waic= TRUE, dic= TRUE)) # Modelo Espacial
+
+# NDVI
+model.INLA.NDVI.Diverse <- inla(f2.NDVI,
+                   family = "gaussian", 
+                   data = inla.stack.data(All.stacks_Diverse),
+                   control.predictor = list(A = inla.stack.A(All.stacks_Diverse), compute= TRUE),
+                   control.compute = list(waic= TRUE, dic= TRUE)) # Modelo Espacial
+```
+
+
+##### **Paso 8**. Explorar los resultados
+
+**BNDVI** No efecto
+
+```{r}
+model.INLA.BNDVI.Diverse$summary.fixed[, c("mean", "sd", "0.025quant", "0.975quant")]
+```  
+
+**ENDVI** No efecto
+
+```{r echo= FALSE}
+model.INLA.ENDVI.Diverse$summary.fixed[, c("mean", "sd", "0.025quant", "0.975quant")]
+```  
+
+**GDVI**  Termino lineal (+) Termino cuadratico (-)
+
+```{r echo= FALSE}
+model.INLA.GDVI.Diverse$summary.fixed[, c("mean", "sd", "0.025quant", "0.975quant")]
+```  
+
+
+**GIPVI**  No efecto
+```{r echo= FALSE}
+model.INLA.GIPVI.Diverse$summary.fixed[, c("mean", "sd", "0.025quant", "0.975quant")]
+```  
+
+
+**GNDVI**  No efecto
+
+```{r echo= FALSE}
+model.INLA.GNDVI.Diverse$summary.fixed[, c("mean", "sd", "0.025quant", "0.975quant")]
+```  
+
+
+**GRVI**  No efecto
+
+```{r echo= FALSE}
+model.INLA.GRVI.Diverse$summary.fixed[, c("mean", "sd", "0.025quant", "0.975quant")]
+```  
+
+
+**GSAVI**  No efecto
+
+```{r echo= FALSE}
+model.INLA.GSAVI.Diverse$summary.fixed[, c("mean", "sd", "0.025quant", "0.975quant")]
+```  
+
+
+**NDVI**  Termino lineal (-)
+
+```{r echo= FALSE}
+model.INLA.NDVI.Diverse$summary.fixed[, c("mean", "sd", "0.025quant", "0.975quant")]
+```    
+
+##### **Paso 10**. Validacion del modelo ¿Existe spatial confounding?
+
+**A.** Obtenemos los interceptos aleatorios espaciales para cada observacion en cada uno de los modelos
+
+```{r}
+w.proj <- inla.mesh.projector(mesh, loc =  Loc)
+
+# u_i para cada modelo
+w.pm_BNDVI   <- inla.mesh.project(w.proj, model.INLA.BNDVI.Diverse$summary.random$w$mean)
+w.pm_ENDVI   <- inla.mesh.project(w.proj, model.INLA.ENDVI.Diverse$summary.random$w$mean)
+w.pm_GDVI   <- inla.mesh.project(w.proj, model.INLA.GDVI.Diverse$summary.random$w$mean)
+w.pm_GIPVI   <- inla.mesh.project(w.proj, model.INLA.GIPVI.Diverse$summary.random$w$mean)
+w.pm_GNDVI   <- inla.mesh.project(w.proj, model.INLA.GNDVI.Diverse$summary.random$w$mean)
+w.pm_GRVI   <- inla.mesh.project(w.proj, model.INLA.GRVI.Diverse$summary.random$w$mean)
+w.pm_GSAVI   <- inla.mesh.project(w.proj, model.INLA.GSAVI.Diverse$summary.random$w$mean)
+w.pm_NDVI   <- inla.mesh.project(w.proj, model.INLA.NDVI.Diverse$summary.random$w$mean)
+```
+
+**B.** Ajustamos un modelo enfrentando los valores del intercepto aleatorio espacial frente al factor fijo Type.
+
+En el caso del **BNDVI** observamos que existe 'Spatial Confounding'
+
+```{r}
+SCbndvi <- inla (w.pm_BNDVI ~ scale(BNDVI),
+               family= "gaussian",
+                data = X,
+                   control.compute = list(dic = TRUE, waic = TRUE)
+                    )
+SCbndvi$summary.fixed[, c("mean", "sd", "0.025quant", "0.975quant")]
+```   
+
+En el caso del **ENDVI** existe 'Spatial Confounding'
+```{r echo= FALSE}
+SCendvi <- inla (w.pm_ENDVI ~ scale(ENDVI),
+               family= "gaussian",
+                data = X,
+                   control.compute = list(dic = TRUE, waic = TRUE)
+                    )
+SCendvi$summary.fixed[, c("mean", "sd", "0.025quant", "0.975quant")]
+```   
+
+En el caso del **GDVI** existe 'Spatial Confounding' con el término lineal
+
+```{r echo= FALSE}
+SCgdvi <- inla (w.pm_GDVI ~ scale(GDVI),
+               family= "gaussian",
+                data = X,
+                   control.compute = list(dic = TRUE, waic = TRUE)
+                    )
+SCgdvi$summary.fixed[, c("mean", "sd", "0.025quant", "0.975quant")]
+```   
+
+No ajustamos un modelo mas simple porque GDVI no entra en el PAPER.
+
+
+En el caso del **GIPVI** existe 'Spatial Confounding' 
+
+```{r echo= FALSE}
+SCgipvi <- inla (w.pm_GIPVI ~ scale(GIPVI),
+               family= "gaussian",
+                data = X,
+                   control.compute = list(dic = TRUE, waic = TRUE)
+                    )
+SCgipvi$summary.fixed[, c("mean", "sd", "0.025quant", "0.975quant")]
+```   
+
+En el caso del **GNDVI** existe 'Spatial Confounding'
+
+```{r echo= FALSE}
+SCgndvi <- inla (w.pm_GNDVI ~ scale(GNDVI),
+               family= "gaussian",
+                data = X,
+                   control.compute = list(dic = TRUE, waic = TRUE)
+                    )
+SCgndvi$summary.fixed[, c("mean", "sd", "0.025quant", "0.975quant")]
+```   
+
+En el caso del **GRVI** existe 'Spatial Confounding'
+
+```{r echo= FALSE}
+SCgrvi <- inla (w.pm_GRVI ~ scale(GRVI),
+               family= "gaussian",
+                data = X,
+                   control.compute = list(dic = TRUE, waic = TRUE)
+                    )
+SCgrvi$summary.fixed[, c("mean", "sd", "0.025quant", "0.975quant")]
+```    
+
+
+En el caso del **GSAVI** existe 'Spatial Confounding'
+
+```{r echo= FALSE}
+SCgsavi <- inla (w.pm_GSAVI ~ scale(GSAVI),
+               family= "gaussian",
+                data = X,
+                   control.compute = list(dic = TRUE, waic = TRUE)
+                    )
+SCgsavi$summary.fixed[, c("mean", "sd", "0.025quant", "0.975quant")]
+```   
+
+
+En el caso del **NDVI** existe 'Spatial Confounding'.
+
+```{r echo= FALSE}
+SCndvi <- inla (w.pm_NDVI ~ scale(NDVI),
+               family= "gaussian",
+                data = X,
+                   control.compute = list(dic = TRUE, waic = TRUE)
+                    )
+SCndvi$summary.fixed[, c("mean", "sd", "0.025quant", "0.975quant")]
+```   
+
+Por lo tanto, lo que tenemos que hacer ahora es ajustar de nuevo los modelos estableciendo restricciones en la componente espacial! El Spatial confoundgin siempre se da con el termino lineal. Vamos a ello:
+
+### **Paso 6**. Especificar la formula del modelo en terminos de la variables respuesta, covariables y el termino de autocorrelacion espacial.
+
+Para establecer restricciones en la componente en la espacial necesitamos lo siguiente:
+```{r}
+XBNDVI <- data.frame(Intercept= Xm[,1], Year2018= Xm[,2], Year2019= Xm[,3], SeasonSpring= Xm[,4], SeasonSummer= Xm[,5], SeasonWinter= Xm[,6], BNDVI1 = scale(Xm[,29]), BNDVI2 = scale(Xm[,30]))
+
+XENDVI <- data.frame(Intercept= Xm[,1], Year2018= Xm[,2], Year2019= Xm[,3], SeasonSpring= Xm[,4], SeasonSummer= Xm[,5], SeasonWinter= Xm[,6], ENDVI1 = scale(Xm[,11]), ENDVI2 = scale(Xm[,12]))
+
+XGIPVI <- data.frame(Intercept= Xm[,1], Year2018= Xm[,2], Year2019= Xm[,3], SeasonSpring= Xm[,4], SeasonSummer= Xm[,5], SeasonWinter= Xm[,6],GIPVI1 = scale(Xm[,17]), GIPVI2 = scale(Xm[,18]))
+
+XGNDVI <- data.frame(Intercept= Xm[,1], Year2018= Xm[,2], Year2019= Xm[,3], SeasonSpring= Xm[,4], SeasonSummer= Xm[,5], SeasonWinter= Xm[,6], GNDVI1 = scale(Xm[,20]), GNDVI2 = scale(Xm[,21]))
+
+XGRVI <- data.frame(Intercept= Xm[,1], Year2018= Xm[,2], Year2019= Xm[,3], SeasonSpring= Xm[,4], SeasonSummer= Xm[,5], SeasonWinter= Xm[,6],GRVI1 = scale(Xm[,23]), GRVI2 = scale(Xm[,24]))
+
+XGSAVI <- data.frame(Intercept= Xm[,1], Year2018= Xm[,2], Year2019= Xm[,3], SeasonSpring= Xm[,4], SeasonSummer= Xm[,5], SeasonWinter= Xm[,6], GSAVI1 = scale(Xm[,26]), GSAVI2 = scale(Xm[,27]))
+
+XNDVI <- data.frame(Intercept= Xm[,1], Year2018= Xm[,2], Year2019= Xm[,3], SeasonSpring= Xm[,4], SeasonSummer= Xm[,5], SeasonWinter= Xm[,6], NDVI1 = scale(Xm[,8]), NDVI2 = scale(Xm[,9]))
+
+n.covariates.poly= 8 # Intercepto + Year(2) + Month (3) + polinomico de cada indice de vegetacion (2)
+n.covariates= 7 # Intercepto + Year(2) + Month (3) + termino lineal de cada indice de vegetacion (1)
+
+Qfact.BNDVI = qr.Q(qr(XBNDVI))
+Qfact.ENDVI = qr.Q(qr(XENDVI))
+Qfact.GIPVI = qr.Q(qr(XGIPVI))
+Qfact.GNDVI = qr.Q(qr(XGNDVI))
+Qfact.GRVI = qr.Q(qr(XGRVI))
+Qfact.GSAVI = qr.Q(qr(XGSAVI))
+Qfact.NDVI = qr.Q(qr(XNDVI))
+```
+
+Describimos las ecuaciones de los modelos. Inicialmente testamos el efecto de los términos lineal y cuadrático. No obstante, si el término cuadrático no tuvo efecto, se borró de la ecuación.
+
+```{r}
+f3.BNDVI <- y ~ -1 + Intercept + Year2018 + Year2019 + SeasonSpring + SeasonSummer + SeasonWinter + scale(BNDVI1) +  scale(BNDVI2) + 
+  f(w, model = spde, extraconstr = list(A = as.matrix(t(Qfact.BNDVI)%*%A2), e= rep(0,n.covariates.poly)))
+
+f3.ENDVI <- y ~ -1 + Intercept + Year2018 + Year2019 + SeasonSpring + SeasonSummer + SeasonWinter +  scale(ENDVI1) +  scale(ENDVI2) + 
+  f(w, model = spde, extraconstr = list(A = as.matrix(t(Qfact.ENDVI)%*%A2), e= rep(0,n.covariates.poly)))
+
+f3.GIPVI <- y ~ -1 + Intercept + Year2018 + Year2019 + SeasonSpring + SeasonSummer + SeasonWinter +  scale(GIPVI1) + scale(GIPVI2) +
+  f(w, model = spde, extraconstr = list(A = as.matrix(t(Qfact.GIPVI)%*%A2), e= rep(0,n.covariates.poly)))
+
+f3.GNDVI <- y ~ -1 + Intercept + Year2018 + Year2019 + SeasonSpring + SeasonSummer + SeasonWinter +  scale(GNDVI1) + scale(GNDVI2) +
+  f(w, model = spde, extraconstr = list(A = as.matrix(t(Qfact.GNDVI)%*%A2), e= rep(0,n.covariates.poly)))
+
+f3.GRVI <- y ~ -1 + Intercept + Year2018 + Year2019 + SeasonSpring + SeasonSummer + SeasonWinter + scale(GRVI1) + scale(GRVI2) +
+  f(w, model = spde, extraconstr = list(A = as.matrix(t(Qfact.GRVI)%*%A2), e= rep(0,n.covariates.poly)))
+
+f3.GSAVI <- y ~ -1 + Intercept + Year2018 + Year2019 + SeasonSpring + SeasonSummer + SeasonWinter +  scale(GSAVI1) + scale(GSAVI2) +
+  f(w, model = spde, extraconstr = list(A = as.matrix(t(Qfact.GSAVI)%*%A2), e= rep(0,n.covariates.poly)))
+
+f3.NDVI <- y ~ -1 + Intercept + Year2018 + Year2019 + SeasonSpring + SeasonSummer + SeasonWinter +  scale(NDVI1)  + scale(NDVI2)  +
+  f(w, model = spde, extraconstr = list(A = as.matrix(t(Qfact.NDVI)%*%A2), e= rep(0,n.covariates.poly)))
+
+```
+
+
+### **Paso 7**. Correr el modelo en INLA
+
+Ajustamos los modelos para la **biomasa de diverse** y todos los indices de vegetacion:
+
+```{r}
+#*2* Analizando el efecto de los indices de vegetacion en la biomasa de epigeos
+# BNDVI
+model.INLA.BNDVI.Diverse_SC <- inla(f3.BNDVI,
+                   family = "gaussian", 
+                   data = inla.stack.data(All.stacks_Diverse),
+                   control.predictor = list(A = inla.stack.A(All.stacks_Diverse), compute= TRUE),
+                   control.compute = list(waic= TRUE, dic= TRUE)) # Modelo Espacial
+# ENDVI
+model.INLA.ENDVI.Diverse_SC <- inla(f3.ENDVI,
+                   family = "gaussian", 
+                   data = inla.stack.data(All.stacks_Diverse),
+                   control.predictor = list(A = inla.stack.A(All.stacks_Diverse), compute= TRUE),
+                   control.compute = list(waic= TRUE, dic= TRUE)) # Modelo Espacial
+
+# GIPVI
+model.INLA.GIPVI.Diverse_SC <- inla(f3.GIPVI,
+                   family = "gaussian", 
+                   data = inla.stack.data(All.stacks_Diverse),
+                   control.predictor = list(A = inla.stack.A(All.stacks_Diverse), compute= TRUE),
+                   control.compute = list(waic= TRUE, dic= TRUE)) # Modelo Espacial
+
+# GNDVI
+model.INLA.GNDVI.Diverse_SC <- inla(f3.GNDVI,
+                   family = "gaussian", 
+                   data = inla.stack.data(All.stacks_Diverse),
+                   control.predictor = list(A = inla.stack.A(All.stacks_Diverse), compute= TRUE),
+                   control.compute = list(waic= TRUE, dic= TRUE)) # Modelo Espacial
+
+# GRVI
+model.INLA.GRVI.Diverse_SC <- inla(f3.GRVI,
+                   family = "gaussian", 
+                   data = inla.stack.data(All.stacks_Diverse),
+                   control.predictor = list(A = inla.stack.A(All.stacks_Diverse), compute= TRUE),
+                   control.compute = list(waic= TRUE, dic= TRUE)) # Modelo Espacial
+
+# GSAVI
+model.INLA.GSAVI.Diverse_SC <- inla(f3.GSAVI,
+                   family = "gaussian", 
+                   data = inla.stack.data(All.stacks_Diverse),
+                   control.predictor = list(A = inla.stack.A(All.stacks_Diverse), compute= TRUE),
+                   control.compute = list(waic= TRUE, dic= TRUE)) # Modelo Espacial
+
+# NDVI
+model.INLA.NDVI.Diverse_SC <- inla(f3.NDVI,
+                   family = "gaussian", 
+                   data = inla.stack.data(All.stacks_Diverse),
+                   control.predictor = list(A = inla.stack.A(All.stacks_Diverse), compute= TRUE),
+                   control.compute = list(waic= TRUE, dic= TRUE)) # Modelo Espacial
+
+```
+
+
+##### **Paso 8**. Explorar los resultados
+
+**BNDVI** Termino lineal (+)
+
+```{r}
+model.INLA.BNDVI.Diverse_SC$summary.fixed[, c("mean", "sd", "0.025quant", "0.975quant")]
+```  
+
+**ENDVI** Termino lineal (+)
+```{r echo= FALSE}
+model.INLA.ENDVI.Diverse_SC$summary.fixed[, c("mean", "sd", "0.025quant", "0.975quant")]
+```  
+
+**GIPVI** No hay efecto
+
+```{r}
+model.INLA.GIPVI.Diverse_SC$summary.fixed[, c("mean", "sd", "0.025quant", "0.975quant")]
+``` 
+
+
+**GNDVI** No hay efecto
+
+```{r}
+model.INLA.GNDVI.Diverse_SC$summary.fixed[, c("mean", "sd", "0.025quant", "0.975quant")]
+``` 
+
+
+**GRVI** Termino cuadratico (-)
+
+```{r}
+model.INLA.GRVI.Diverse_SC$summary.fixed[, c("mean", "sd", "0.025quant", "0.975quant")]
+``` 
+
+
+**GSAVI** No hay efecto
+
+```{r}
+model.INLA.GSAVI.Diverse_SC$summary.fixed[, c("mean", "sd", "0.025quant", "0.975quant")]
+``` 
+
+
+**NDVI**  No hay efecto
+```{r echo= FALSE}
+model.INLA.NDVI.Diverse_SC$summary.fixed[, c("mean", "sd", "0.025quant", "0.975quant")]
+``` 
+ 
+
+### **Paso 6**. Especificar la formula del modelo en terminos de la variables respuesta, covariables y el termino de autocorrelacion espacial.
+
+Para establecer restricciones en la componente en la espacial necesitamos lo siguiente:
+```{r}
+XBNDVI <- data.frame(Intercept= Xm[,1], Year2018= Xm[,2], Year2019= Xm[,3], SeasonSpring= Xm[,4], SeasonSummer= Xm[,5], SeasonWinter= Xm[,6], BNDVI = scale(Xm[,28]))
+XENDVI <- data.frame(Intercept= Xm[,1], Year2018= Xm[,2], Year2019= Xm[,3], SeasonSpring= Xm[,4], SeasonSummer= Xm[,5], SeasonWinter= Xm[,6], ENDVI = scale(Xm[,10]))
+XNDVI <- data.frame(Intercept= Xm[,1], Year2018= Xm[,2], Year2019= Xm[,3], SeasonSpring= Xm[,4], SeasonSummer= Xm[,5], SeasonWinter= Xm[,6], NDVI = scale(Xm[,7]))
+XGIPVI <- data.frame(Intercept= Xm[,1], Year2018= Xm[,2], Year2019= Xm[,3], SeasonSpring= Xm[,4], SeasonSummer= Xm[,5], SeasonWinter= Xm[,6],GIPVI = scale(Xm[,16]))
+XGNDVI <- data.frame(Intercept= Xm[,1], Year2018= Xm[,2], Year2019= Xm[,3], SeasonSpring= Xm[,4], SeasonSummer= Xm[,5], SeasonWinter= Xm[,6], GNDVI = scale(Xm[,19]))
+XGRVI <- data.frame(Intercept= Xm[,1], Year2018= Xm[,2], Year2019= Xm[,3], SeasonSpring= Xm[,4], SeasonSummer= Xm[,5], SeasonWinter= Xm[,6],GRVI = scale(Xm[,22]))
+XGSAVI <- data.frame(Intercept= Xm[,1], Year2018= Xm[,2], Year2019= Xm[,3], SeasonSpring= Xm[,4], SeasonSummer= Xm[,5], SeasonWinter= Xm[,6], GSAVI = scale(Xm[,25]))
+
+
+n.covariates.poly= 8 # Intercepto + Year(2) + Month (3) + polinomico de cada indice de vegetacion (2)
+n.covariates= 7 # Intercepto + Year(2) + Month (3) + termino lineal de cada indice de vegetacion (1)
+
+Qfact.BNDVI = qr.Q(qr(XBNDVI))
+Qfact.ENDVI = qr.Q(qr(XENDVI))
+Qfact.GIPVI = qr.Q(qr(XGIPVI))
+Qfact.GNDVI = qr.Q(qr(XGNDVI))
+Qfact.GRVI = qr.Q(qr(XGRVI))
+Qfact.GSAVI = qr.Q(qr(XGSAVI))
+Qfact.NDVI = qr.Q(qr(XNDVI))
+```
+
+Describimos las ecuaciones de los modelos. Inicialmente testamos el efecto de los términos lineal y cuadrático. No obstante, si el término cuadrático no tuvo efecto, se borró de la ecuación.
+
+```{r}
+f3.BNDVI <- y ~ -1 + Intercept + Year2018 + Year2019 + SeasonSpring + SeasonSummer + SeasonWinter +  scale(BNDVI) +
+  f(w, model = spde, extraconstr = list(A = as.matrix(t(Qfact.BNDVI)%*%A2), e= rep(0,n.covariates)))
+
+f3.ENDVI <- y ~ -1 + Intercept + Year2018 + Year2019 + SeasonSpring + SeasonSummer + SeasonWinter +  scale(ENDVI) +
+  f(w, model = spde, extraconstr = list(A = as.matrix(t(Qfact.ENDVI)%*%A2), e= rep(0,n.covariates)))
+
+f3.GIPVI <- y ~ -1 + Intercept + Year2018 + Year2019 + SeasonSpring + SeasonSummer + SeasonWinter +  scale(GIPVI) +
+  f(w, model = spde, extraconstr = list(A = as.matrix(t(Qfact.GIPVI)%*%A2), e= rep(0,n.covariates)))
+
+f3.GNDVI <- y ~ -1 + Intercept + Year2018 + Year2019 + SeasonSpring + SeasonSummer + SeasonWinter +  scale(GNDVI) +
+  f(w, model = spde, extraconstr = list(A = as.matrix(t(Qfact.GNDVI)%*%A2), e= rep(0,n.covariates)))
+
+f3.GRVI <- y ~ -1 + Intercept + Year2018 + Year2019 + SeasonSpring + SeasonSummer + SeasonWinter + scale(GRVI) + 
+  f(w, model = spde, extraconstr = list(A = as.matrix(t(Qfact.GRVI)%*%A2), e= rep(0,n.covariates)))
+
+f3.GSAVI <- y ~ -1 + Intercept + Year2018 + Year2019 + SeasonSpring + SeasonSummer + SeasonWinter +  scale(GSAVI) +
+  f(w, model = spde, extraconstr = list(A = as.matrix(t(Qfact.GSAVI)%*%A2), e= rep(0,n.covariates)))
+
+f3.NDVI <- y ~ -1 + Intercept + Year2018 + Year2019 + SeasonSpring + SeasonSummer + SeasonWinter +  scale(NDVI) +
+  f(w, model = spde, extraconstr = list(A = as.matrix(t(Qfact.NDVI)%*%A2), e= rep(0,n.covariates)))
+
+```
+
+
+### **Paso 7**. Correr el modelo en INLA
+
+Ajustamos los modelos para la **biomasa de predatory arthropods** y todos los indices de vegetacion:
+
+```{r}
+#*2* Analizando el efecto de los indices de vegetacion en la biomasa de epigeos
+# BNDVI
+model.INLA.BNDVI.Diverse_SC <- inla(f3.BNDVI,
+                   family = "gaussian", 
+                   data = inla.stack.data(All.stacks_Diverse),
+                   control.predictor = list(A = inla.stack.A(All.stacks_Diverse), compute= TRUE),
+                   control.compute = list(waic= TRUE, dic= TRUE)) # Modelo Espacial
+
+# ENDVI
+model.INLA.ENDVI.Diverse_SC <- inla(f3.ENDVI,
+                   family = "gaussian", 
+                   data = inla.stack.data(All.stacks_Diverse),
+                   control.predictor = list(A = inla.stack.A(All.stacks_Diverse), compute= TRUE),
+                   control.compute = list(waic= TRUE, dic= TRUE)) # Modelo Espacial
+
+# GIPVI
+model.INLA.GIPVI.Diverse_SC <- inla(f3.GIPVI,
+                   family = "gaussian", 
+                   data = inla.stack.data(All.stacks_Diverse),
+                   control.predictor = list(A = inla.stack.A(All.stacks_Diverse), compute= TRUE),
+                   control.compute = list(waic= TRUE, dic= TRUE)) # Modelo Espacial
+
+# GNDVI
+model.INLA.GNDVI.Diverse_SC <- inla(f3.GNDVI,
+                   family = "gaussian", 
+                   data = inla.stack.data(All.stacks_Diverse),
+                   control.predictor = list(A = inla.stack.A(All.stacks_Diverse), compute= TRUE),
+                   control.compute = list(waic= TRUE, dic= TRUE)) # Modelo Espacial
+
+# GRVI
+model.INLA.GRVI.Diverse_SC <- inla(f3.GRVI,
+                   family = "gaussian", 
+                   data = inla.stack.data(All.stacks_Diverse),
+                   control.predictor = list(A = inla.stack.A(All.stacks_Diverse), compute= TRUE),
+                   control.compute = list(waic= TRUE, dic= TRUE)) # Modelo Espacial
+
+# GSAVI
+model.INLA.GSAVI.Diverse_SC <- inla(f3.GSAVI,
+                   family = "gaussian", 
+                   data = inla.stack.data(All.stacks_Diverse),
+                   control.predictor = list(A = inla.stack.A(All.stacks_Diverse), compute= TRUE),
+                   control.compute = list(waic= TRUE, dic= TRUE)) # Modelo Espacial
+
+
+# NDVI
+model.INLA.NDVI.Diverse_SC <- inla(f3.NDVI,
+                   family = "gaussian", 
+                   data = inla.stack.data(All.stacks_Diverse),
+                   control.predictor = list(A = inla.stack.A(All.stacks_Diverse), compute= TRUE),
+                   control.compute = list(waic= TRUE, dic= TRUE)) # Modelo Espacial
+
+```
+
+
+##### **Paso 8**. Explorar los resultados
+
+**BNDVI** Termino lineal (+)
+```{r echo= FALSE}
+model.INLA.BNDVI.Diverse_SC$summary.fixed[, c("mean", "sd", "0.025quant", "0.975quant")]
+```    
+
+```{r}
+index.Cov <- inla.stack.index(All.stacks_Diverse,
+                              tag = "Covariates")$data
+
+Predichos <- model.INLA.BNDVI.Diverse_SC$summary.fitted.values[index.Cov, c(1,3,5)]
+
+# Mean values
+Predicted.mean <- vector(length= 1000)
+Predicted.BCILow <- vector(length= 1000) 
+Predicted.BCIHigh <- vector(length= 1000)
+
+for(x in 1:1000){
+  items <- which(MyData$BNDVI == unique(MyData$BNDVI)[x])
+  Predicted.mean [x] <- mean(Predichos[items, 1])
+  Predicted.BCILow [x] <- mean(Predichos[items, 2])
+  Predicted.BCIHigh [x] <- mean(Predichos[items, 3])
+}
+
+# It is the second one we need as these are for the
+# artificial covariate values.
+# Add them to the MyData object.
+MyData1 <- data.frame (BNDVI= unique(MyData$BNDVI), Predicted.mean, Predicted.BCILow, Predicted.BCIHigh) 
+
+MyData1 <- rename(MyData1, 
+                  c("Predicted.mean" = "Predicted.meanlog", 
+                    "Predicted.BCILow" = "Predicted.BCILowlog",
+                    "Predicted.BCIHigh" = "Predicted.BCIHighlog"))
+MyData1$Predicted.mean <- exp(MyData1$Predicted.meanlog) - 1
+MyData1$Predicted.BCIHigh <- exp(MyData1$Predicted.BCIHighlog) -1
+MyData1$Predicted.BCILow <- exp(MyData1$Predicted.BCILowlog) -1
+
+p.BNDVI <- ggplot(data=MyData1, aes(x=BNDVI, ymin = Predicted.BCILow, ymax = Predicted.BCIHigh,  y= Predicted.mean)) + 
+  geom_line(size= 1) + 
+  geom_ribbon(alpha=0.3)
+
+p.BNDVI <- p.BNDVI +  geom_jitter (aes (x=NIR_bndvi, y = Diverse), data= Data, alpha= 0.6, inherit.aes = FALSE, size= 4, show.legend = FALSE) +
+  xlab("BNDVI") + 
+  ylab("Diverse Arthropods (mg)") + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_line(colour = "black", size= 1.5), 
+                                                axis.title.x = element_text(size = 33, margin = margin(t = 5, r = 0, b = 0, l = 0)),
+                                                axis.title.y = element_text(size = 33, margin = margin(t = 0, r = 10, b = 0, l = 0)), 
+                                                axis.text = element_text(size= 27),  plot.margin = unit(c(0.5, 0.5, 1, 1), "cm"))
+
+```   
+
+
+```{r echo= FALSE}
+p.BNDVI.log <- ggplot(data=MyData1, aes(x=BNDVI, y= Predicted.meanlog)) + 
+  geom_line(size= 1.5) + 
+  geom_jitter (aes (x=NIR_bndvi, y = LDiverse), data= Data, alpha= 0.4, inherit.aes = FALSE, size= 4, show.legend = FALSE)
+  
+p.BNDVI.log <- p.BNDVI.log +  geom_ribbon(aes(x=BNDVI, ymin = Predicted.BCILowlog, ymax = Predicted.BCIHighlog,  y= Predicted.meanlog), alpha=0.3) +
+  xlab("BNDVI") + 
+  ylab("Log diverse arthropods (mg)") + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_line(colour = "black", size= 1.5), 
+                                                axis.title.x = element_text(size = 33, margin = margin(t = 5, r = 0, b = 0, l = 0)),
+                                                axis.title.y = element_text(size = 33, margin = margin(t = 0, r = 10, b = 0, l = 0)), 
+                                                axis.text = element_text(size= 27),  plot.margin = unit(c(0.5, 0.5, 1, 1), "cm"))
+
+```  
+
+**ENDVI** Termino lineal (+)
+```{r echo= FALSE}
+model.INLA.ENDVI.Diverse_SC$summary.fixed[, c("mean", "sd", "0.025quant", "0.975quant")]
+```   
+
+```{r}
+index.Cov <- inla.stack.index(All.stacks_Diverse,
+                              tag = "Covariates")$data
+
+Predichos <- model.INLA.ENDVI.Diverse_SC$summary.fitted.values[index.Cov, c(1,3,5)]
+
+# Mean values
+Predicted.mean <- vector(length= 1000)
+Predicted.BCILow <- vector(length= 1000) 
+Predicted.BCIHigh <- vector(length= 1000)
+
+for(x in 1:1000){
+  items <- which(MyData$ENDVI == unique(MyData$ENDVI)[x])
+  Predicted.mean [x] <- mean(Predichos[items, 1])
+  Predicted.BCILow [x] <- mean(Predichos[items, 2])
+  Predicted.BCIHigh [x] <- mean(Predichos[items, 3])
+}
+
+# It is the second one we need as these are for the
+# artificial covariate values.
+# Add them to the MyData object.
+MyData1 <- data.frame (ENDVI= unique(MyData$ENDVI), Predicted.mean, Predicted.BCILow, Predicted.BCIHigh) 
+
+MyData1 <- rename(MyData1, 
+                  c("Predicted.mean" = "Predicted.meanlog", 
+                    "Predicted.BCILow" = "Predicted.BCILowlog",
+                    "Predicted.BCIHigh" = "Predicted.BCIHighlog"))
+MyData1$Predicted.mean <- exp(MyData1$Predicted.meanlog) - 1
+MyData1$Predicted.BCIHigh <- exp(MyData1$Predicted.BCIHighlog) -1
+MyData1$Predicted.BCILow <- exp(MyData1$Predicted.BCILowlog) -1
+
+p.ENDVI <- ggplot(data=MyData1, aes(x=ENDVI, ymin = Predicted.BCILow, ymax = Predicted.BCIHigh,  y= Predicted.mean)) + 
+  geom_line(size= 1) + 
+  geom_ribbon(alpha=0.3)
+
+p.ENDVI <- p.ENDVI +  geom_jitter (aes (x=NIR_endvi, y = Diverse), data= Data, alpha= 0.6, inherit.aes = FALSE, size= 4, show.legend = FALSE) +
+  xlab("ENDVI") + 
+  ylab("") + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_line(colour = "black", size= 1.5), 
+                                                axis.title.x = element_text(size = 33, margin = margin(t = 5, r = 0, b = 0, l = 0)),
+                                                axis.title.y = element_text(size = 33, margin = margin(t = 0, r = 10, b = 0, l = 0)), 
+                                                axis.text = element_text(size= 27),  plot.margin = unit(c(0.5, 0.5, 1, 1), "cm"))
+
+```   
+
+
+```{r echo= FALSE}
+p.ENDVI.log <- ggplot(data=MyData1, aes(x=ENDVI, y= Predicted.meanlog)) + 
+  geom_line(size= 1.5) + 
+  geom_jitter (aes (x=NIR_endvi, y = LDiverse), data= Data, alpha= 0.4, inherit.aes = FALSE, size= 4, show.legend = FALSE)
+  
+p.ENDVI.log <- p.ENDVI.log +  geom_ribbon(aes(x=ENDVI, ymin = Predicted.BCILowlog, ymax = Predicted.BCIHighlog,  y= Predicted.meanlog), alpha=0.3) +
+  xlab("ENDVI") + 
+  ylab("") + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_line(colour = "black", size= 1.5), 
+                                                axis.title.x = element_text(size = 33, margin = margin(t = 5, r = 0, b = 0, l = 0)),
+                                                axis.title.y = element_text(size = 33, margin = margin(t = 0, r = 10, b = 0, l = 0)), 
+                                                axis.text = element_text(size= 27),  plot.margin = unit(c(0.5, 1, 1, 1), "cm"))
+
+```  
+
+
+**GIPVI** No hay efecto
+```{r echo= FALSE}
+model.INLA.GIPVI.Diverse_SC$summary.fixed[, c("mean", "sd", "0.025quant", "0.975quant")]
+```  
+
+**GNDVI** No hay efecto
+```{r echo= FALSE}
+model.INLA.GNDVI.Diverse_SC$summary.fixed[, c("mean", "sd", "0.025quant", "0.975quant")]
+```  
+
+**GRVI** No hay efecto
+```{r echo= FALSE}
+model.INLA.GRVI.Diverse_SC$summary.fixed[, c("mean", "sd", "0.025quant", "0.975quant")]
+```  
+
+**GSAVI** No hay efecto
+```{r echo= FALSE}
+model.INLA.GSAVI.Diverse_SC$summary.fixed[, c("mean", "sd", "0.025quant", "0.975quant")]
+```  
+
+**NDVI** No hay efecto
+```{r echo= FALSE}
+model.INLA.NDVI.Diverse_SC$summary.fixed[, c("mean", "sd", "0.025quant", "0.975quant")]
+```   
+
+
+##### **Paso 9**. Representar los resultados conjuntamente:
+```{r, fig.width= 23, fig.height= 9}
+# create an apporpriate viewport.  Modify the dimensions and coordinates as needed
+plot_grid(p.BNDVI.log, p.ENDVI.log,
+          lables= c("A", "B"),
+          nrow= 1, ncol= 2)
+```
+    
+En escala natural:
+```{r, fig.width= 15, fig.height= 8, warning= FALSE}
+# create an apporpriate viewport.  Modify the dimensions and coordinates as needed
+plot_grid(p.BNDVI, p.ENDVI,
+          lables= c("A", "B"),
+          nrow= 1, ncol= 2)
+```     
