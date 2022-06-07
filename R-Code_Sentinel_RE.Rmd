@@ -1,0 +1,1733 @@
+---
+title: "Sentinel - Vegetation Indices Red Edge"
+date: "29/11/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+**AIM** To evaluate the correlation between the Vegetation Indices (VI) calculated from Sentinel Red Edge and: A) the Biomass of Epigeous arthropods; and B) the Biommas of Coprophagous arthropods. 
+
+#### 1. Load libraries
+```{r message= FALSE, warning= FALSE}
+library(lattice)
+library(ggplot2)
+library(plyr)
+library(grid)
+library(fields)
+library(INLA)
+library(vegan)
+library(readxl)
+library(cowplot)
+```
+
+#### 2. Load the data
+
+```{r}
+Data <- read_excel("Data_Sentinel.xlsx")
+```
+
+We remove those observations that are not in shrub or grassland habitat
+```{r}
+Data <- subset(Data, Data$Actuation == "Grassland" | Data$Actuation == "Shrub")
+```
+
+Log-transform response variables:
+```{r}
+Data$LogEPIGEOUS_ALL <- log10(Data$EPIGEOUS_ALL + 1)
+Data$LogCOP_ALL <- log10(Data$COP_ALL + 1)
+```      
+
+Is there **collinearity** among predictor (year, season and VIs)?. GVIF^(1/2Df)>2 suggest collinearity. **There is not collinearity**
+
+**BNDVI**   
+```{r echo= FALSE}
+corvif <- function(dataz) {
+  dataz <- as.data.frame(dataz)
+  
+  #vif part
+  form    <- formula(paste("fooy ~ ",paste(strsplit(names(dataz)," "),collapse=" + ")))
+  dataz   <- data.frame(fooy=1 + rnorm(nrow(dataz)) ,dataz)
+  lm_mod  <- lm(form,dataz)
+  
+  cat("\n\nVariance inflation factors\n\n")
+  print(myvif(lm_mod))
+}
+
+# Support function for corvif. Will not be called by the user
+myvif <- function(mod) {
+  v <- vcov(mod)
+  assign <- attributes(model.matrix(mod))$assign
+  if (names(coefficients(mod)[1]) == "(Intercept)") {
+    v <- v[-1, -1]
+    assign <- assign[-1]
+  } else warning("No intercept: vifs may not be sensible.")
+  terms <- labels(terms(mod))
+  n.terms <- length(terms)
+  if (n.terms < 2) stop("The model contains fewer than 2 terms")
+  if (length(assign) > dim(v)[1] ) {
+    diag(tmp_cor)<-0
+    if (any(tmp_cor==1.0)){
+      return("Sample size is too small, 100% collinearity is present")
+    } else {
+      return("Sample size is too small")
+    }
+  }
+  R <- cov2cor(v)
+  detR <- det(R)
+  result <- matrix(0, n.terms, 3)
+  rownames(result) <- terms
+  colnames(result) <- c("GVIF", "Df", "GVIF^(1/2Df)")
+  for (term in 1:n.terms) {
+    subs <- which(assign == term)
+    result[term, 1] <- det(as.matrix(R[subs, subs])) * det(as.matrix(R[-subs, -subs])) / detR
+    result[term, 2] <- length(subs)
+  }
+  if (all(result[, 2] == 1)) {
+    result <- data.frame(GVIF=result[, 1])
+  } else {
+    result[, 3] <- result[, 1]^(1/(2 * result[, 2]))
+  }
+  invisible(result)
+}
+## END VIF FUNCTION
+corvif (Data[, c("Year", "Season", "RE_bndvi")])
+```
+**ENDVI**   
+```{r echo= FALSE}
+## END VIF FUNCTION
+corvif (Data[, c("Year", "Season", "RE_endvi")])
+```    
+**GIPVI**   
+```{r echo= FALSE}
+## END VIF FUNCTION
+corvif (Data[, c("Year", "Season", "RE_gipvi")])
+```    
+
+**GNDVI**   
+```{r echo= FALSE}
+## END VIF FUNCTION
+corvif (Data[, c("Year", "Season", "RE_gndvi")])
+```     
+
+**GRVI**   
+```{r echo= FALSE}
+## END VIF FUNCTION
+corvif (Data[, c("Year", "Season", "RE_grvi")])
+```    
+
+**GSAVI**   
+```{r echo= FALSE}
+## END VIF FUNCTION
+corvif (Data[, c("Year", "Season", "RE_gsavi")])
+```   
+ 
+**NDVI**   
+```{r echo= FALSE}
+## END VIF FUNCTION
+corvif (Data[, c("Year", "Season", "RE_ndvi")])
+```   
+
+#### A. **Biomass of epigeous arthropods**
+
+Remove NAs:
+```{r}
+Data <- Data[-which(is.na(Data$EPIGEOUS_ALL)),]
+```
+
+Transform into factors:
+```{r}
+Data$Year <- as.factor(Data$Year)
+Data$Season <- as.factor(Data$Season)
+Data$Locality <- as.factor(Data$Locality)
+Data$Estacion <- as.factor(Data$Estacion)
+Data$Action <- as.factor(Data$Action)
+Data$Actuation <- as.factor(Data$Actuation)
+str(Data)
+```    
+
+#### 3. We start working with INLA:
+
+##### **Step 1**. Create a mesh
+
+```{r}
+Loc <- cbind(Data$X/1000, Data$Y/1000)
+D <- dist(Loc)
+Bound <- inla.nonconvex.hull(Loc, convex= -0.15)
+mesh    <- inla.mesh.2d(boundary= Bound, 
+                        max.edge=  c(1,5)
+)
+mesh$n
+```
+
+Plot the mesh:
+```{r, fig.height= 10, fig.width= 10}
+plot(mesh)
+points(Loc, col = 1, pch = 16, cex = 1)
+```
+
+#####  **Step 2**. Define the weighting factors a_ik
+
+```{r}
+A2 <- inla.spde.make.A(mesh, loc = Loc)
+dim(A2)
+```
+
+##### **Step 3**. Define the SPDE
+
+```{r}
+spde <- inla.spde2.matern(mesh, alpha=2)
+```
+
+##### **Step 4**. Define the spatial field u
+
+```{r}
+w.index <- inla.spde.make.index(
+  name    = 'w', 
+  n.spde  = spde$n.spde)
+```
+
+##### **Step 5**. Make a stack 
+
+```{r}
+Xm <- model.matrix(~ Year + Season + Data$RE_ndvi + poly(Data$RE_ndvi,2) + Data$RE_endvi + poly(Data$RE_endvi,2) + 
+                    Data$RE_gdvi + poly(Data$RE_gdvi,2) + Data$RE_gipvi + poly(Data$RE_gipvi,2) + Data$RE_gndvi + poly(Data$RE_gndvi,2) + 
+                    Data$RE_grvi + poly(Data$RE_grvi,2) + Data$RE_gsavi + poly(Data$RE_gsavi,2) + Data$RE_bndvi + poly(Data$RE_bndvi,2), data= Data)
+
+X <- data.frame(Intercept= Xm[,1],
+                Year2018= Xm[,2],
+                Year2019= Xm[,3],
+                SeasonSpring= Xm[,4],
+                SeasonSummer= Xm[,5],
+                SeasonWinter= Xm[,6],
+                NDVI= Xm[,7],
+                NDVI1= Xm[,8],
+                NDVI2 = Xm[,9],
+                ENDVI= Xm[,10],
+                ENDVI1 = Xm[,11],
+                ENDVI2 = Xm[,12],
+                GDVI= Xm[,13],
+                GDVI1 = Xm[,14],
+                GDVI2 = Xm[,15],
+                GIPVI = Xm[,16],
+                GIPVI1 = Xm[,17],
+                GIPVI2 = Xm[,18],
+                GNDVI = Xm[,19],
+                GNDVI1 = Xm[,20],
+                GNDVI2 = Xm[,21],
+                GRVI = Xm[,22],
+                GRVI1 = Xm[,23],
+                GRVI2 = Xm[,24],
+                GSAVI = Xm[,25],
+                GSAVI1 = Xm[,26],
+                GSAVI2 = Xm[,27],
+                BNDVI = Xm[,28],
+                BNDVI1 = Xm[,29],
+                BNDVI2 = Xm[,30])
+
+MyData <- data.frame(NDVI= rep(seq(from= range(Data$RE_ndvi)[1],
+                                   to= range(Data$RE_ndvi)[2],
+                                   length.out= 1000), 9),
+                     ENDVI= rep(seq(from= range(Data$RE_endvi)[1],
+                                   to= range(Data$RE_endvi)[2],
+                                   length.out= 1000), 9),
+                     GDVI= rep(seq(from= range(Data$RE_gdvi)[1],
+                                   to= range(Data$RE_gdvi)[2],
+                                   length.out= 1000), 9),
+                     GIPVI= rep(seq(from= range(Data$RE_gipvi)[1],
+                                    to= range(Data$RE_gipvi)[2],
+                                    length.out= 1000), 9),
+                     GNDVI= rep(seq(from= range(Data$RE_gndvi)[1],
+                                    to= range(Data$RE_gndvi)[2],
+                                    length.out= 1000), 9),
+                     GRVI= rep(seq(from= range(Data$RE_grvi)[1],
+                                   to= range(Data$RE_grvi)[2],
+                                   length.out= 1000), 9),
+                     GSAVI= rep(seq(from= range(Data$RE_gsavi)[1],
+                                    to= range(Data$RE_gsavi)[2],
+                                    length.out= 1000), 9),
+                     BNDVI= rep(seq(from= range(Data$RE_bndvi)[1],
+                                    to= range(Data$RE_bndvi)[2],
+                                    length.out= 1000), 9),
+                     Year= c(rep(2017, 1000*2), rep(2018, 1000*3), rep(2019, 1000*4)),
+                     Season= c(rep("Summer", 1000), rep("Spring", 1000), 
+                              rep("Summer", 1000), rep("Spring", 1000), rep("Autumn", 1000),
+                              rep("Winter", 1000), rep("Summer", 1000), rep("Spring", 1000), rep("Autumn", 1000)))
+
+MyData$Season <- as.factor(MyData$Season)
+MyData$Year <- as.factor(MyData$Year)
+
+Xpred <- model.matrix(~ Year + Season + NDVI + poly(NDVI,2) + ENDVI + poly(ENDVI,2) + GDVI + poly(GDVI,2) + GIPVI + poly(GIPVI,2) +
+                      GNDVI + poly(GNDVI,2) + GRVI + poly(GRVI,2) + GSAVI + poly(GSAVI,2) + BNDVI + poly(BNDVI,2),
+                      data= MyData)
+
+Xpred <- data.frame(Intercept= Xpred[,1],
+                    Year2018= Xpred[,2],
+                    Year2019= Xpred[,3],
+                    SeasonSpring= Xpred[,4],
+                    SeasonSummer= Xpred[,5],
+                    SeasonWinter= Xpred[,6],
+                    NDVI = Xpred[,7],
+                    NDVI1 = Xpred[,8], 
+                    NDVI2 = Xpred[,9],
+                    ENDVI = Xpred[,10],
+                    ENDVI1 = Xpred[,11],
+                    ENDVI2 = Xpred[,12],
+                    GDVI = Xpred[,13],
+                    GDVI1 = Xpred[,14],
+                    GDVI2 = Xpred[,15],
+                    GIPVI = Xpred[,16],
+                    GIPVI1 = Xpred[,17],
+                    GIPVI2 = Xpred[,18],
+                    GNDVI = Xpred[,19],
+                    GNDVI1 = Xpred[,20],
+                    GNDVI2 = Xpred[,21],
+                    GRVI = Xpred[,22],
+                    GRVI1 = Xpred[,23],
+                    GRVI2 = Xpred[,24],
+                    GSAVI = Xpred[,25],
+                    GSAVI1 = Xpred[,26],
+                    GSAVI2 = Xpred[,27],
+                    BNDVI = Xpred[,28],
+                    BNDVI1 = Xpred[,29],
+                    BNDVI2 = Xpred[,30])
+
+
+StackCov <- inla.stack(
+  tag = "Covariates",
+  data = list(y = NA),  # NA values because we are going to predict these ones!
+  A = list(1),                  
+  effects = list(Xp = Xpred))
+
+# Stack para la biomasa de epigeos
+StackFit_Epigeos <- inla.stack(
+  tag  = "Fit",
+  data = list(y = Data$LogEPIGEOUS_ALL),  
+  A    = list(1,A2),  # Intercept and covariates, spatial field                    
+  effects = list(X = X, #Intercept and Covariates
+                 w = w.index))          #Spatial field  
+
+All.stacks_Epigeos <- inla.stack(StackFit_Epigeos, StackCov)
+```
+
+
+##### **Step 6**. Formula
+
+```{r}
+# BNDVI
+f2.BNDVI <- y ~ -1 + Intercept + Year2018 + Year2019 + SeasonSpring + SeasonSummer + SeasonWinter + scale(BNDVI1) + scale(BNDVI2)  + f(w, model = spde)
+
+# ENDVI
+f2.ENDVI <- y ~ -1 + Intercept + Year2018 + Year2019 + SeasonSpring + SeasonSummer + SeasonWinter + scale(ENDVI1) + scale(ENDVI2) + f(w, model = spde)
+
+# GIPVI
+f2.GIPVI <- y ~ -1 + Intercept + Year2018 + Year2019 + SeasonSpring + SeasonSummer + SeasonWinter + scale(GIPVI1)  + scale(GIPVI2) + f(w, model = spde)
+
+# GNDVI
+f2.GNDVI <- y ~ -1 + Intercept + Year2018 + Year2019 + SeasonSpring + SeasonSummer + SeasonWinter + scale(GNDVI1)  + scale(GNDVI2) + f(w, model = spde)
+
+# GRVI
+f2.GRVI <- y ~ -1 + Intercept + Year2018 + Year2019 + SeasonSpring + SeasonSummer + SeasonWinter +  scale(GRVI1)  + scale(GRVI2) + f(w, model = spde)
+
+# GSAVI
+f2.GSAVI <- y ~ -1 + Intercept + Year2018 + Year2019 + SeasonSpring + SeasonSummer + SeasonWinter + scale(GSAVI1)  + scale(GSAVI2)  + f(w, model = spde)
+
+# NDVI
+f2.NDVI <- y ~ -1 + Intercept + Year2018 + Year2019 + SeasonSpring + SeasonSummer + SeasonWinter + scale(NDVI) + f(w, model = spde)
+```
+
+##### **Step 7**. Fit the model
+
+```{r}
+# BNDVI
+model.INLA.BNDVI.Epi <- inla(f2.BNDVI,
+                   family = "gaussian", 
+                   data = inla.stack.data(All.stacks_Epigeos),
+                   control.predictor = list(A = inla.stack.A(All.stacks_Epigeos), compute= TRUE),
+                   control.compute = list(waic= TRUE, dic= TRUE)) # 
+
+# ENDVI
+model.INLA.ENDVI.Epi <- inla(f2.ENDVI,
+                   family = "gaussian", 
+                   data = inla.stack.data(All.stacks_Epigeos),
+                   control.predictor = list(A = inla.stack.A(All.stacks_Epigeos), compute= TRUE),
+                   control.compute = list(waic= TRUE, dic= TRUE)) # 
+
+# GIPVI
+model.INLA.GIPVI.Epi <- inla(f2.GIPVI,
+                   family = "gaussian", 
+                   data = inla.stack.data(All.stacks_Epigeos),
+                   control.predictor = list(A = inla.stack.A(All.stacks_Epigeos), compute= TRUE),
+                   control.compute = list(waic= TRUE, dic= TRUE)) # 
+
+# GNDVI
+model.INLA.GNDVI.Epi <- inla(f2.GNDVI,
+                   family = "gaussian", 
+                   data = inla.stack.data(All.stacks_Epigeos),
+                   control.predictor = list(A = inla.stack.A(All.stacks_Epigeos), compute= TRUE),
+                   control.compute = list(waic= TRUE, dic= TRUE)) # 
+
+# GRVI
+model.INLA.GRVI.Epi <- inla(f2.GRVI,
+                   family = "gaussian", 
+                   data = inla.stack.data(All.stacks_Epigeos),
+                   control.predictor = list(A = inla.stack.A(All.stacks_Epigeos), compute= TRUE),
+                   control.compute = list(waic= TRUE, dic= TRUE)) # 
+
+# GSAVI
+model.INLA.GSAVI.Epi <- inla(f2.GSAVI,
+                   family = "gaussian", 
+                   data = inla.stack.data(All.stacks_Epigeos),
+                   control.predictor = list(A = inla.stack.A(All.stacks_Epigeos), compute= TRUE),
+                   control.compute = list(waic= TRUE, dic= TRUE)) # 
+
+# NDVI
+model.INLA.NDVI.Epi <- inla(f2.NDVI,
+                   family = "gaussian", 
+                   data = inla.stack.data(All.stacks_Epigeos),
+                   control.predictor = list(A = inla.stack.A(All.stacks_Epigeos), compute= TRUE),
+                   control.compute = list(waic= TRUE, dic= TRUE)) # 
+```
+
+
+##### **Step 8**. Results
+
+**BNDVI**
+
+```{r}
+model.INLA.BNDVI.Epi$summary.fixed[, c("mean", "0.025quant", "0.975quant")]
+```  
+
+**ENDVI**
+
+```{r echo= FALSE}
+model.INLA.ENDVI.Epi$summary.fixed[, c("mean", "0.025quant", "0.975quant")]
+```  
+
+**GIPVI**
+```{r echo= FALSE}
+model.INLA.GIPVI.Epi$summary.fixed[, c("mean", "0.025quant", "0.975quant")]
+```  
+
+**GNDVI**
+```{r echo= FALSE}
+model.INLA.GNDVI.Epi$summary.fixed[, c("mean", "0.025quant", "0.975quant")]
+```  
+
+**GRVI**
+```{r echo= FALSE}
+model.INLA.GRVI.Epi$summary.fixed[, c("mean", "0.025quant", "0.975quant")]
+```  
+
+**GSAVI** 
+```{r echo= FALSE}
+model.INLA.GSAVI.Epi$summary.fixed[, c("mean", "0.025quant", "0.975quant")]
+```  
+
+**NDVI**
+```{r echo= FALSE}
+model.INLA.NDVI.Epi$summary.fixed[, c("mean", "0.025quant", "0.975quant")]
+```  
+
+##### **Step 10**. Model validation: Is there spatial confounding?
+
+**A.** Random spatial intercepts:
+```{r}
+w.proj <- inla.mesh.projector(mesh, loc =  Loc)
+
+w.pm_BNDVI   <- inla.mesh.project(w.proj, model.INLA.BNDVI.Epi$summary.random$w$mean)
+w.pm_ENDVI   <- inla.mesh.project(w.proj, model.INLA.ENDVI.Epi$summary.random$w$mean)
+w.pm_GIPVI   <- inla.mesh.project(w.proj, model.INLA.GIPVI.Epi$summary.random$w$mean)
+w.pm_GNDVI   <- inla.mesh.project(w.proj, model.INLA.GNDVI.Epi$summary.random$w$mean)
+w.pm_GRVI   <- inla.mesh.project(w.proj, model.INLA.GRVI.Epi$summary.random$w$mean)
+w.pm_GSAVI   <- inla.mesh.project(w.proj, model.INLA.GSAVI.Epi$summary.random$w$mean)
+w.pm_NDVI   <- inla.mesh.project(w.proj, model.INLA.NDVI.Epi$summary.random$w$mean)
+```
+
+**B.** Random spatial intercepts vs VIs
+
+**BNDVI** 'Spatial Confounding'
+```{r}
+SCbndvi <- inla (w.pm_BNDVI ~ scale(BNDVI),
+               family= "gaussian",
+                data = X,
+                   control.compute = list(dic = TRUE, waic = TRUE)
+                    )
+SCbndvi$summary.fixed[, c("mean", "0.025quant", "0.975quant")]
+```   
+
+**ENDVI** 'Spatial Confounding'
+```{r echo= FALSE}
+SCendvi <- inla (w.pm_ENDVI ~ scale(ENDVI),
+               family= "gaussian",
+                data = X,
+                   control.compute = list(dic = TRUE, waic = TRUE)
+                    )
+SCendvi$summary.fixed[, c("mean", "0.025quant", "0.975quant")]
+```   
+
+**GIPVI** 'Spatial Confounding'
+```{r echo= FALSE}
+SCgipvi <- inla (w.pm_GIPVI ~ scale(GIPVI),
+               family= "gaussian",
+                data = X,
+                   control.compute = list(dic = TRUE, waic = TRUE)
+                    )
+SCgipvi$summary.fixed[, c("mean", "0.025quant", "0.975quant")]
+```   
+
+**GNDVI** 'Spatial Confounding'
+```{r echo= FALSE}
+SCgndvi <- inla (w.pm_GNDVI ~ scale(GNDVI),
+               family= "gaussian",
+                data = X,
+                   control.compute = list(dic = TRUE, waic = TRUE)
+                    )
+SCgndvi$summary.fixed[, c("mean", "0.025quant", "0.975quant")]
+```   
+
+**GRVI** 'Spatial Confounding'
+```{r echo= FALSE}
+SCgrvi <- inla (w.pm_GRVI ~ scale(GRVI),
+               family= "gaussian",
+                data = X,
+                   control.compute = list(dic = TRUE, waic = TRUE)
+                    )
+SCgrvi$summary.fixed[, c("mean", "0.025quant", "0.975quant")]
+```   
+
+**NDVI**
+```{r echo= FALSE}
+SCndvi <- inla (w.pm_NDVI ~ scale(NDVI),
+               family= "gaussian",
+                data = X,
+                   control.compute = list(dic = TRUE, waic = TRUE)
+                    )
+SCndvi$summary.fixed[, c("mean", "0.025quant", "0.975quant")]
+```   
+
+Plot:
+```{r}
+index.Cov <- inla.stack.index(All.stacks_Epigeos,
+                              tag = "Covariates")$data
+
+Predichos <- model.INLA.NDVI.Epi$summary.fitted.values[index.Cov, c(1,3,5)]
+
+# Mean values
+Predicted.mean <- vector(length= 1000)
+Predicted.BCILow <- vector(length= 1000) 
+Predicted.BCIHigh <- vector(length= 1000)
+
+for(x in 1:1000){
+  items <- which(MyData$NDVI == unique(MyData$NDVI)[x])
+  Predicted.mean [x] <- mean(Predichos[items, 1])
+  Predicted.BCILow [x] <- mean(Predichos[items, 2])
+  Predicted.BCIHigh [x] <- mean(Predichos[items, 3])
+}
+
+# It is the second one we need as these are for the
+# artificial covariate values.
+# Add them to the MyData object.
+MyData1 <- data.frame (NDVI= unique(MyData$NDVI), Predicted.mean, Predicted.BCILow, Predicted.BCIHigh) 
+
+MyData1 <- rename(MyData1, 
+                  c("Predicted.mean" = "Predicted.meanlog", 
+                    "Predicted.BCILow" = "Predicted.BCILowlog",
+                    "Predicted.BCIHigh" = "Predicted.BCIHighlog"))
+MyData1$Predicted.mean <- exp(MyData1$Predicted.meanlog) - 1
+MyData1$Predicted.BCIHigh <- exp(MyData1$Predicted.BCIHighlog) -1
+MyData1$Predicted.BCILow <- exp(MyData1$Predicted.BCILowlog) -1
+
+p.NDVI <- ggplot(data=MyData1, aes(x=NDVI, ymin = Predicted.BCILow, ymax = Predicted.BCIHigh,  y= Predicted.mean)) + 
+  geom_line(size= 1) + 
+  geom_ribbon(alpha=0.3)
+
+p.NDVI <- p.NDVI +  geom_jitter (aes (x=RE_ndvi, y = EPIGEOUS_ALL), data= Data, alpha= 0.6, inherit.aes = FALSE, size= 3, show.legend = FALSE) +
+  xlab("NDVI") + 
+  ylab("Biommass of epigeous arthropodos (mg)") + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_line(colour = "black"), 
+                                                axis.title.x = element_text(size = 12, margin = margin(t = 5, r = 0, b = 0, l = 0)),
+                                                axis.title.y = element_text(size = 12, margin = margin(t = 0, r = 10, b = 0, l = 0)), 
+                                                axis.text = element_text(size= 10), plot.margin = margin(0, 0, 0, 0))
+
+```   
+
+
+```{r echo= FALSE}
+p.NDVI.log <- ggplot(data=MyData1, aes(x=NDVI, y= Predicted.meanlog)) + 
+  geom_line(size= 1.5) + 
+  geom_jitter (aes (x=RE_ndvi, y = LogEPIGEOUS_ALL), data= Data, alpha= 0.4, inherit.aes = FALSE, size= 4, show.legend = FALSE)
+ 
+
+p.NDVI.log <- p.NDVI.log +   geom_ribbon(data=MyData1, aes(x=NDVI, ymin = Predicted.BCILowlog, ymax = Predicted.BCIHighlog,  y= Predicted.meanlog), alpha=0.3)  +
+  xlab("NDVI") + 
+  ylab("") + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_line(colour = "black", size= 1.5), 
+                                                axis.title.x = element_text(size = 31, margin = margin(t = 5, r = 0, b = 0, l = 0)),
+                                                axis.title.y = element_text(size = 31, margin = margin(t = 0, r = 10, b = 0, l = 0)), 
+                                                axis.text = element_text(size= 27), plot.margin = unit(c(0.5, 0.5, 1, 1), "cm"))
+
+```  
+
+
+### **Step 6**. Formula controlling by spatial confounding (restrictions in the spatial component)
+```{r}
+Xm <- model.matrix(~ Year + Season + 
+                     RE_ndvi + poly(RE_ndvi,2) + RE_endvi + poly(RE_endvi,2) + RE_gdvi + 
+                     poly(RE_gdvi,2) + RE_gipvi + poly(RE_gipvi,2) + RE_gndvi + 
+                     poly(RE_gndvi,2) + RE_grvi + poly(RE_grvi,2) + RE_gsavi + poly(RE_gsavi,2) + 
+                     RE_bndvi + poly(RE_bndvi,2), data= Data)
+
+XBndvi <- data.frame(Intercept= Xm[,1], Year2018= Xm[,2], Year2019= Xm[,3], SeasonSpring= Xm[,4], SeasonSummer= Xm[,5], SeasonWinter= Xm[,6],
+                    BNDVI1 = Xm[,29], BNDVI2 = Xm[,30])
+XENDVI <- data.frame(Intercept= Xm[,1], Year2018= Xm[,2], Year2019= Xm[,3], SeasonSpring= Xm[,4], SeasonSummer= Xm[,5], SeasonWinter= Xm[,6],
+                    ENDVI = Xm[,10])
+XGIPVI <- data.frame(Intercept= Xm[,1], Year2018= Xm[,2], Year2019= Xm[,3], SeasonSpring= Xm[,4], SeasonSummer= Xm[,5], SeasonWinter= Xm[,6],
+                     GIPVI = Xm[,16])
+XGNDVI <- data.frame(Intercept= Xm[,1], Year2018= Xm[,2], Year2019= Xm[,3], SeasonSpring= Xm[,4], SeasonSummer= Xm[,5], SeasonWinter= Xm[,6],
+                     GNDVI = Xm[,19])
+XGRVI <- data.frame(Intercept= Xm[,1], Year2018= Xm[,2], Year2019= Xm[,3], SeasonSpring= Xm[,4], SeasonSummer= Xm[,5], SeasonWinter= Xm[,6],
+                     GRVI = Xm[,22])
+XGSAVI <- data.frame(Intercept= Xm[,1], Year2018= Xm[,2], Year2019= Xm[,3], SeasonSpring= Xm[,4], SeasonSummer= Xm[,5], SeasonWinter= Xm[,6],
+                    GSAVI = Xm[,25])
+
+n.covariates.poly= 8 # Intercept + Year(2) + Month (3) + poly VI (2)
+n.covariates= 7 # Intercept + Year(2) + Month (3) + lineal term vI (1)
+
+Qfact.BNDVI = qr.Q(qr(XBndvi))
+Qfact.ENDVI = qr.Q(qr(XENDVI))
+Qfact.GIPVI = qr.Q(qr(XGIPVI))
+Qfact.GNDVI = qr.Q(qr(XGNDVI))
+Qfact.GRVI = qr.Q(qr(XGRVI))
+Qfact.GSAVI = qr.Q(qr(XGSAVI))
+```
+
+Formula
+```{r}
+f3.BNDVI <- y ~ -1 + Intercept + Year2018 + Year2019 + SeasonSpring + SeasonSummer + SeasonWinter + scale(BNDVI1) +  scale(BNDVI2) + 
+  f(w, model = spde, extraconstr = list(A = as.matrix(t(Qfact.BNDVI)%*%A2), e= rep(0,n.covariates.poly)))
+
+f3.ENDVI <- y ~ -1 + Intercept + Year2018 + Year2019 + SeasonSpring + SeasonSummer + SeasonWinter +  scale(ENDVI) +
+  f(w, model = spde, extraconstr = list(A = as.matrix(t(Qfact.ENDVI)%*%A2), e= rep(0,n.covariates)))
+
+f3.GIPVI <- y ~ -1 + Intercept + Year2018 + Year2019 + SeasonSpring + SeasonSummer + SeasonWinter +  scale(GIPVI) + 
+  f(w, model = spde, extraconstr = list(A = as.matrix(t(Qfact.GIPVI)%*%A2), e= rep(0,n.covariates)))
+
+f3.GNDVI <- y ~ -1 + Intercept + Year2018 + Year2019 + SeasonSpring + SeasonSummer + SeasonWinter +  scale(GNDVI) + 
+  f(w, model = spde, extraconstr = list(A = as.matrix(t(Qfact.GNDVI)%*%A2), e= rep(0,n.covariates)))
+
+f3.GRVI <- y ~ -1 + Intercept + Year2018 + Year2019 + SeasonSpring + SeasonSummer + SeasonWinter + scale(GRVI) + 
+  f(w, model = spde, extraconstr = list(A = as.matrix(t(Qfact.GRVI)%*%A2), e= rep(0,n.covariates)))
+
+f3.GSAVI <- y ~ -1 + Intercept + Year2018 + Year2019 + SeasonSpring + SeasonSummer + SeasonWinter +  scale(GSAVI) +
+  f(w, model = spde, extraconstr = list(A = as.matrix(t(Qfact.GSAVI)%*%A2), e= rep(0,n.covariates)))
+```
+
+
+### **Step 7**. Fit the models in INLA
+
+```{r}
+# BNDVI
+model.INLA.BNDVI.Epi_SC <- inla(f3.BNDVI,
+                   family = "gaussian", 
+                   data = inla.stack.data(All.stacks_Epigeos),
+                   control.predictor = list(A = inla.stack.A(All.stacks_Epigeos), compute= TRUE),
+                   control.compute = list(waic= TRUE, dic= TRUE)) # 
+
+# ENDVI
+model.INLA.ENDVI.Epi_SC <- inla(f3.ENDVI,
+                   family = "gaussian", 
+                   data = inla.stack.data(All.stacks_Epigeos),
+                   control.predictor = list(A = inla.stack.A(All.stacks_Epigeos), compute= TRUE),
+                   control.compute = list(waic= TRUE, dic= TRUE)) # 
+
+# GIPVI
+model.INLA.GIPVI.Epi_SC <- inla(f3.GIPVI,
+                   family = "gaussian", 
+                   data = inla.stack.data(All.stacks_Epigeos),
+                   control.predictor = list(A = inla.stack.A(All.stacks_Epigeos), compute= TRUE),
+                   control.compute = list(waic= TRUE, dic= TRUE)) # 
+
+# GNDVI
+model.INLA.GNDVI.Epi_SC <- inla(f3.GNDVI,
+                   family = "gaussian", 
+                   data = inla.stack.data(All.stacks_Epigeos),
+                   control.predictor = list(A = inla.stack.A(All.stacks_Epigeos), compute= TRUE),
+                   control.compute = list(waic= TRUE, dic= TRUE)) # 
+
+# GRVI
+model.INLA.GRVI.Epi_SC <- inla(f3.GRVI,
+                   family = "gaussian", 
+                   data = inla.stack.data(All.stacks_Epigeos),
+                   control.predictor = list(A = inla.stack.A(All.stacks_Epigeos), compute= TRUE),
+                   control.compute = list(waic= TRUE, dic= TRUE)) # 
+
+# GSAVI
+model.INLA.GSAVI.Epi_SC <- inla(f3.GSAVI,
+                   family = "gaussian", 
+                   data = inla.stack.data(All.stacks_Epigeos),
+                   control.predictor = list(A = inla.stack.A(All.stacks_Epigeos), compute= TRUE),
+                   control.compute = list(waic= TRUE, dic= TRUE)) # 
+
+```
+
+
+##### **Step 8**. Results
+
+**BNDVI**
+
+```{r}
+model.INLA.BNDVI.Epi_SC$summary.fixed[, c("mean", "0.025quant", "0.975quant")]
+```     
+
+```{r}
+index.Cov <- inla.stack.index(All.stacks_Epigeos,
+                              tag = "Covariates")$data
+
+Predichos <- model.INLA.BNDVI.Epi_SC$summary.fitted.values[index.Cov, c(1,3,5)]
+
+# Mean values
+Predicted.mean <- vector(length= 1000)
+Predicted.BCILow <- vector(length= 1000) 
+Predicted.BCIHigh <- vector(length= 1000)
+
+for(x in 1:1000){
+  items <- which(MyData$BNDVI == unique(MyData$BNDVI)[x])
+  Predicted.mean [x] <- mean(Predichos[items, 1])
+  Predicted.BCILow [x] <- mean(Predichos[items, 2])
+  Predicted.BCIHigh [x] <- mean(Predichos[items, 3])
+}
+
+# It is the second one we need as these are for the
+# artificial covariate values.
+# Add them to the MyData object.
+MyData1 <- data.frame (BNDVI= unique(MyData$BNDVI), Predicted.mean, Predicted.BCILow, Predicted.BCIHigh) 
+
+MyData1 <- rename(MyData1, 
+                  c("Predicted.mean" = "Predicted.meanlog", 
+                    "Predicted.BCILow" = "Predicted.BCILowlog",
+                    "Predicted.BCIHigh" = "Predicted.BCIHighlog"))
+MyData1$Predicted.mean <- exp(MyData1$Predicted.meanlog) - 1
+MyData1$Predicted.BCIHigh <- exp(MyData1$Predicted.BCIHighlog) -1
+MyData1$Predicted.BCILow <- exp(MyData1$Predicted.BCILowlog) -1
+
+p.BNDVI <- ggplot(data=MyData1, aes(x=BNDVI, ymin = Predicted.BCILow, ymax = Predicted.BCIHigh,  y= Predicted.mean)) + 
+  geom_line(size= 1) + 
+  geom_ribbon(alpha=0.3)
+
+p.BNDVI <- p.BNDVI +  geom_jitter (aes (x=RE_bndvi, y = EPIGEOUS_ALL), data= Data, alpha= 0.6, inherit.aes = FALSE, size= 3, show.legend = FALSE) +
+  xlab("BNDVI") + 
+  ylab("Biommass of epigeous arthropodos (mg)") + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_line(colour = "black"), 
+                                                axis.title.x = element_text(size = 12, margin = margin(t = 5, r = 0, b = 0, l = 0)),
+                                                axis.title.y = element_text(size = 12, margin = margin(t = 0, r = 10, b = 0, l = 0)), 
+                                                axis.text = element_text(size= 10), plot.margin = margin(0, 0, 0, 0))
+
+```   
+
+
+```{r echo= FALSE}
+p.BNDVI.log <- ggplot(data=MyData1, aes(x=BNDVI, y= Predicted.meanlog)) + 
+  geom_line(size= 1.5) + 
+  geom_jitter (aes (x=RE_bndvi, y = LogEPIGEOUS_ALL), data= Data, alpha= 0.4, inherit.aes = FALSE, size= 4, show.legend = FALSE)
+  
+p.BNDVI.log <- p.BNDVI.log + geom_ribbon(data=MyData1, aes(x=BNDVI, ymin = Predicted.BCILowlog, ymax = Predicted.BCIHighlog,  y= Predicted.meanlog), alpha=0.3)  +
+  xlab("BNDVI") + 
+  ylab("Log Epigeous Biomass (mg)") + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_line(colour = "black", size= 1.5), 
+                                                axis.title.x = element_text(size = 31, margin = margin(t = 5, r = 0, b = 0, l = 0)),
+                                                axis.title.y = element_text(size = 31, margin = margin(t = 0, r = 10, b = 0, l = 0)), 
+                                                axis.text = element_text(size= 27), plot.margin = unit(c(0.5, 0.5, 1, 1), "cm"))
+
+```  
+
+**ENDVI**
+```{r echo= FALSE}
+model.INLA.ENDVI.Epi_SC$summary.fixed[, c("mean", "0.025quant", "0.975quant")]
+```  
+
+
+```{r}
+index.Cov <- inla.stack.index(All.stacks_Epigeos,
+                              tag = "Covariates")$data
+
+Predichos <- model.INLA.ENDVI.Epi_SC$summary.fitted.values[index.Cov, c(1,3,5)]
+
+# Mean values
+Predicted.mean <- vector(length= 1000)
+Predicted.BCILow <- vector(length= 1000) 
+Predicted.BCIHigh <- vector(length= 1000)
+
+for(x in 1:1000){
+  items <- which(MyData$ENDVI == unique(MyData$ENDVI)[x])
+  Predicted.mean [x] <- mean(Predichos[items, 1])
+  Predicted.BCILow [x] <- mean(Predichos[items, 2])
+  Predicted.BCIHigh [x] <- mean(Predichos[items, 3])
+}
+
+# It is the second one we need as these are for the
+# artificial covariate values.
+# Add them to the MyData object.
+MyData1 <- data.frame (ENDVI= unique(MyData$ENDVI), Predicted.mean, Predicted.BCILow, Predicted.BCIHigh) 
+
+MyData1 <- rename(MyData1, 
+                  c("Predicted.mean" = "Predicted.meanlog", 
+                    "Predicted.BCILow" = "Predicted.BCILowlog",
+                    "Predicted.BCIHigh" = "Predicted.BCIHighlog"))
+MyData1$Predicted.mean <- exp(MyData1$Predicted.meanlog) - 1
+MyData1$Predicted.BCIHigh <- exp(MyData1$Predicted.BCIHighlog) -1
+MyData1$Predicted.BCILow <- exp(MyData1$Predicted.BCILowlog) -1
+
+p.ENDVI <- ggplot(data=MyData1, aes(x=ENDVI, ymin = Predicted.BCILow, ymax = Predicted.BCIHigh,  y= Predicted.mean)) + 
+  geom_line(size= 1) + 
+  geom_ribbon(alpha=0.3)
+
+p.ENDVI <- p.ENDVI +  geom_jitter (aes (x=RE_endvi, y = EPIGEOUS_ALL), data= Data, alpha= 0.6, inherit.aes = FALSE, size= 3, show.legend = FALSE) +
+  xlab("ENDVI") + 
+  ylab("Biommass of epigeous arthropodos (mg)") + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_line(colour = "black"), 
+                                                axis.title.x = element_text(size = 12, margin = margin(t = 5, r = 0, b = 0, l = 0)),
+                                                axis.title.y = element_text(size = 12, margin = margin(t = 0, r = 10, b = 0, l = 0)), 
+                                                axis.text = element_text(size= 10), plot.margin = margin(0, 0, 0, 0))
+
+```   
+
+
+```{r echo= FALSE}
+p.ENDVI.log <- ggplot(data=MyData1, aes(x=ENDVI, y= Predicted.meanlog)) + 
+  geom_line(size= 1.5) + 
+  geom_jitter (aes (x=RE_endvi, y = LogEPIGEOUS_ALL), data= Data, alpha= 0.4, inherit.aes = FALSE, size= 4, show.legend = FALSE) 
+  
+
+p.ENDVI.log <- p.ENDVI.log + geom_ribbon(data=MyData1, aes(x=ENDVI, ymin = Predicted.BCILowlog, ymax = Predicted.BCIHighlog,  y= Predicted.meanlog), alpha=0.3) +
+  xlab("ENDVI") + 
+  ylab("") + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_line(colour = "black", size= 1.5), 
+                                                axis.title.x = element_text(size = 31, margin = margin(t = 5, r = 0, b = 0, l = 0)),
+                                                axis.title.y = element_text(size = 31, margin = margin(t = 0, r = 10, b = 0, l = 0)), 
+                                                axis.text = element_text(size= 27), plot.margin = unit(c(0.5, 0.8, 1, 1), "cm"))
+
+```  
+
+**GIPVI**
+```{r echo= FALSE}
+model.INLA.GIPVI.Epi_SC$summary.fixed[, c("mean", "0.025quant", "0.975quant")]
+```    
+
+
+**GNDVI**
+```{r echo= FALSE}
+model.INLA.GNDVI.Epi_SC$summary.fixed[, c("mean", "0.025quant", "0.975quant")]
+```   
+
+
+**GRVI**
+```{r echo= FALSE}
+model.INLA.GRVI.Epi_SC$summary.fixed[, c("mean", "0.025quant", "0.975quant")]
+```    
+
+
+**GSAVI**
+```{r echo= FALSE}
+model.INLA.GSAVI.Epi_SC$summary.fixed[, c("mean", "0.025quant", "0.975quant")]
+```   
+   
+
+##### **Step 9**. Plot all results together:
+
+```{r, fig.width= 25, fig.height= 8}
+# create an apporpriate viewport.  Modify the dimensions and coordinates as needed
+plot_grid(p.BNDVI.log, p.ENDVI.log, p.NDVI.log,
+          lables= c("A", "B", "C"),
+          nrow= 1, ncol= 3)
+```
+
+
+```{r, fig.width= 10, fig.height= 8, warning= FALSE}
+# create an apporpriate viewport.  Modify the dimensions and coordinates as needed
+plot_grid(p.BNDVI, p.ENDVI, p.NDVI,
+          lables= c("A", "B", "C"),
+          nrow= 2, ncol= 2)
+```     
+
+
+#### B. **Biomass of Coprophagous Arthropods**
+
+```{r}
+Data <- read_excel("Data_Sentinel.xlsx")
+```
+
+We remove those observations that are not in shrub or grassland habitat
+```{r}
+Data <- subset(Data, Data$Actuation == "Grassland" | Data$Actuation == "Shrub")
+```
+
+Log-transform response variables:
+```{r}
+Data$LogEPIGEOUS_ALL <- log10(Data$EPIGEOUS_ALL + 1)
+Data$LogCOP_ALL <- log10(Data$COP_ALL + 1)
+``` 
+
+We remove NAs:
+```{r}
+Data <- Data[-which(is.na(Data$COP_ALL)),]
+```
+
+Transform into Factors
+```{r}
+Data$Year <- as.factor(Data$Year)
+Data$Season <- as.factor(Data$Season)
+Data$Locality <- as.factor(Data$Locality)
+Data$Estacion <- as.factor(Data$Estacion)
+Data$Action <- as.factor(Data$Action)
+Data$Actuation <- as.factor(Data$Actuation)
+str(Data)
+```  
+
+#### 3. Start working with INLA
+
+From **Step 1** to **Step 4** above
+
+##### **Step 5**. Make a stack 
+
+```{r}
+Xm <- model.matrix(~ Year + Season + Data$RE_ndvi + poly(Data$RE_ndvi,2) + Data$RE_endvi + poly(Data$RE_endvi,2) + 
+                    Data$RE_gdvi + poly(Data$RE_gdvi,2) + Data$RE_gipvi + poly(Data$RE_gipvi,2) + Data$RE_gndvi + poly(Data$RE_gndvi,2) + 
+                    Data$RE_grvi + poly(Data$RE_grvi,2) + Data$RE_gsavi + poly(Data$RE_gsavi,2) + Data$RE_bndvi + poly(Data$RE_bndvi,2), data= Data)
+
+X <- data.frame(Intercept= Xm[,1],
+                Year2018= Xm[,2],
+                Year2019= Xm[,3],
+                SeasonSpring= Xm[,4],
+                SeasonSummer= Xm[,5],
+                SeasonWinter= Xm[,6],
+                NDVI= Xm[,7],
+                NDVI1= Xm[,8],
+                NDVI2 = Xm[,9],
+                ENDVI= Xm[,10],
+                ENDVI1 = Xm[,11],
+                ENDVI2 = Xm[,12],
+                GDVI= Xm[,13],
+                GDVI1 = Xm[,14],
+                GDVI2 = Xm[,15],
+                GIPVI = Xm[,16],
+                GIPVI1 = Xm[,17],
+                GIPVI2 = Xm[,18],
+                GNDVI = Xm[,19],
+                GNDVI1 = Xm[,20],
+                GNDVI2 = Xm[,21],
+                GRVI = Xm[,22],
+                GRVI1 = Xm[,23],
+                GRVI2 = Xm[,24],
+                GSAVI = Xm[,25],
+                GSAVI1 = Xm[,26],
+                GSAVI2 = Xm[,27],
+                BNDVI = Xm[,28],
+                BNDVI1 = Xm[,29],
+                BNDVI2 = Xm[,30])
+
+MyData <- data.frame(NDVI= rep(seq(from= range(Data$RE_ndvi)[1],
+                                   to= range(Data$RE_ndvi)[2],
+                                   length.out= 1000), 9),
+                     ENDVI= rep(seq(from= range(Data$RE_endvi)[1],
+                                   to= range(Data$RE_endvi)[2],
+                                   length.out= 1000), 9),
+                     GDVI= rep(seq(from= range(Data$RE_gdvi)[1],
+                                   to= range(Data$RE_gdvi)[2],
+                                   length.out= 1000), 9),
+                     GIPVI= rep(seq(from= range(Data$RE_gipvi)[1],
+                                    to= range(Data$RE_gipvi)[2],
+                                    length.out= 1000), 9),
+                     GNDVI= rep(seq(from= range(Data$RE_gndvi)[1],
+                                    to= range(Data$RE_gndvi)[2],
+                                    length.out= 1000), 9),
+                     GRVI= rep(seq(from= range(Data$RE_grvi)[1],
+                                   to= range(Data$RE_grvi)[2],
+                                   length.out= 1000), 9),
+                     GSAVI= rep(seq(from= range(Data$RE_gsavi)[1],
+                                    to= range(Data$RE_gsavi)[2],
+                                    length.out= 1000), 9),
+                     BNDVI= rep(seq(from= range(Data$RE_bndvi)[1],
+                                    to= range(Data$RE_bndvi)[2],
+                                    length.out= 1000), 9),
+                     Year= c(rep(2017, 1000*2), rep(2018, 1000*3), rep(2019, 1000*4)),
+                     Season= c(rep("Summer", 1000), rep("Spring", 1000), 
+                              rep("Summer", 1000), rep("Spring", 1000), rep("Autumn", 1000),
+                              rep("Winter", 1000), rep("Summer", 1000), rep("Spring", 1000), rep("Autumn", 1000)))
+
+MyData$Season <- as.factor(MyData$Season)
+MyData$Year <- as.factor(MyData$Year)
+
+Xpred <- model.matrix(~ Year + Season + NDVI + poly(NDVI,2) + ENDVI + poly(ENDVI,2) + GDVI + poly(GDVI,2) + GIPVI + poly(GIPVI,2) +
+                      GNDVI + poly(GNDVI,2) + GRVI + poly(GRVI,2) + GSAVI + poly(GSAVI,2) + BNDVI + poly(BNDVI,2),
+                      data= MyData)
+
+Xpred <- data.frame(Intercept= Xpred[,1],
+                    Year2018= Xpred[,2],
+                    Year2019= Xpred[,3],
+                    SeasonSpring= Xpred[,4],
+                    SeasonSummer= Xpred[,5],
+                    SeasonWinter= Xpred[,6],
+                    NDVI = Xpred[,7],
+                    NDVI1 = Xpred[,8], 
+                    NDVI2 = Xpred[,9],
+                    ENDVI = Xpred[,10],
+                    ENDVI1 = Xpred[,11],
+                    ENDVI2 = Xpred[,12],
+                    GDVI = Xpred[,13],
+                    GDVI1 = Xpred[,14],
+                    GDVI2 = Xpred[,15],
+                    GIPVI = Xpred[,16],
+                    GIPVI1 = Xpred[,17],
+                    GIPVI2 = Xpred[,18],
+                    GNDVI = Xpred[,19],
+                    GNDVI1 = Xpred[,20],
+                    GNDVI2 = Xpred[,21],
+                    GRVI = Xpred[,22],
+                    GRVI1 = Xpred[,23],
+                    GRVI2 = Xpred[,24],
+                    GSAVI = Xpred[,25],
+                    GSAVI1 = Xpred[,26],
+                    GSAVI2 = Xpred[,27],
+                    BNDVI = Xpred[,28],
+                    BNDVI1 = Xpred[,29],
+                    BNDVI2 = Xpred[,30])
+
+
+StackCov <- inla.stack(
+  tag = "Covariates",
+  data = list(y = NA),  # NA values because we are going to predict these ones!
+  A = list(1),                  
+  effects = list(Xp = Xpred))
+
+StackFit_Coprofagos <- inla.stack(
+  tag  = "Fit",
+  data = list(y = Data$LogCOP_ALL),  
+  A    = list(1,A2),  # Intercept and covariates, spatial field                    
+  effects = list(X = X, #Intercept and Covariates
+                 w = w.index))          #Spatial field  
+
+All.stacks_Coprofagos <- inla.stack(StackFit_Coprofagos, StackCov)
+```
+
+
+##### **Step 6**. Formula
+
+```{r}
+# BNDVI
+f2.BNDVI <- y ~ -1 + Intercept + Year2018 + Year2019 + SeasonSpring + SeasonSummer + SeasonWinter + scale(BNDVI1) + scale(BNDVI2) + f(w, model = spde)
+
+# ENDVI
+f2.ENDVI <- y ~ -1 + Intercept + Year2018 + Year2019 + SeasonSpring + SeasonSummer + SeasonWinter + scale(ENDVI1) + scale(ENDVI2) + f(w, model = spde)
+
+# GIPVI
+f2.GIPVI <- y ~ -1 + Intercept + Year2018 + Year2019 + SeasonSpring + SeasonSummer + SeasonWinter + scale(GIPVI1) +  scale(GIPVI2) + f(w, model = spde)
+
+# GNDVI
+f2.GNDVI <- y ~ -1 + Intercept + Year2018 + Year2019 + SeasonSpring + SeasonSummer + SeasonWinter + scale(GNDVI1) + scale(GNDVI2) + f(w, model = spde)
+
+# GRVI
+f2.GRVI <- y ~ -1 + Intercept + Year2018 + Year2019 + SeasonSpring + SeasonSummer + SeasonWinter + scale(GRVI1) + scale(GRVI2) + f(w, model = spde)
+
+# GSAVI
+f2.GSAVI <- y ~ -1 + Intercept + Year2018 + Year2019 + SeasonSpring + SeasonSummer + SeasonWinter + scale(GSAVI1) + scale(GSAVI2) + f(w, model = spde)
+
+# NDVI
+f2.NDVI <- y ~ -1 + Intercept + Year2018 + Year2019 + SeasonSpring + SeasonSummer + SeasonWinter + scale(NDVI) + f(w, model = spde)
+
+```
+
+
+##### **Step 7**.  Fit the mode:
+
+```{r}
+# BNDVI
+model.INLA.BNDVI.Cop <- inla(f2.BNDVI,
+                   family = "gaussian", 
+                   data = inla.stack.data(All.stacks_Coprofagos),
+                   control.predictor = list(A = inla.stack.A(All.stacks_Coprofagos), compute= TRUE),
+                   control.compute = list(waic= TRUE, dic= TRUE)) # 
+
+# ENDVI
+model.INLA.ENDVI.Cop <- inla(f2.ENDVI,
+                   family = "gaussian", 
+                   data = inla.stack.data(All.stacks_Coprofagos),
+                   control.predictor = list(A = inla.stack.A(All.stacks_Coprofagos), compute= TRUE),
+                   control.compute = list(waic= TRUE, dic= TRUE)) # 
+
+# GIPVI
+model.INLA.GIPVI.Cop <- inla(f2.GIPVI,
+                   family = "gaussian", 
+                   data = inla.stack.data(All.stacks_Coprofagos),
+                   control.predictor = list(A = inla.stack.A(All.stacks_Coprofagos), compute= TRUE),
+                   control.compute = list(waic= TRUE, dic= TRUE)) # 
+
+# GNDVI
+model.INLA.GNDVI.Cop <- inla(f2.GNDVI,
+                   family = "gaussian", 
+                   data = inla.stack.data(All.stacks_Coprofagos),
+                   control.predictor = list(A = inla.stack.A(All.stacks_Coprofagos), compute= TRUE),
+                   control.compute = list(waic= TRUE, dic= TRUE)) # 
+
+# GRVI
+model.INLA.GRVI.Cop <- inla(f2.GRVI,
+                   family = "gaussian", 
+                   data = inla.stack.data(All.stacks_Coprofagos),
+                   control.predictor = list(A = inla.stack.A(All.stacks_Coprofagos), compute= TRUE),
+                   control.compute = list(waic= TRUE, dic= TRUE)) # 
+
+# GSAVI
+model.INLA.GSAVI.Cop <- inla(f2.GSAVI,
+                   family = "gaussian", 
+                   data = inla.stack.data(All.stacks_Coprofagos),
+                   control.predictor = list(A = inla.stack.A(All.stacks_Coprofagos), compute= TRUE),
+                   control.compute = list(waic= TRUE, dic= TRUE)) # 
+
+# NDVI
+model.INLA.NDVI.Cop <- inla(f2.NDVI,
+                   family = "gaussian", 
+                   data = inla.stack.data(All.stacks_Coprofagos),
+                   control.predictor = list(A = inla.stack.A(All.stacks_Coprofagos), compute= TRUE),
+                   control.compute = list(waic= TRUE, dic= TRUE)) # 
+
+```
+
+##### **Step 8**. Results
+
+**BNDVI**
+
+```{r}
+model.INLA.BNDVI.Cop$summary.fixed[, c("mean", "0.025quant", "0.975quant")]
+```  
+
+**ENDVI**
+
+```{r echo= FALSE}
+model.INLA.ENDVI.Cop$summary.fixed[, c("mean", "0.025quant", "0.975quant")]
+```  
+     
+     
+**GDVI**
+```{r echo= FALSE}
+model.INLA.GDVI.Cop$summary.fixed[, c("mean", "0.025quant", "0.975quant")]
+``` 
+
+**GIPVI**  
+```{r echo= FALSE}
+model.INLA.GIPVI.Cop$summary.fixed[, c("mean", "0.025quant", "0.975quant")]
+``` 
+
+**GNDVI** 
+```{r echo= FALSE}
+model.INLA.GNDVI.Cop$summary.fixed[, c("mean", "0.025quant", "0.975quant")]
+```
+
+**GRVI**
+```{r echo= FALSE}
+model.INLA.GRVI.Cop$summary.fixed[, c("mean", "0.025quant", "0.975quant")]
+```  
+
+**GSAVI**  
+```{r echo= FALSE}
+model.INLA.GSAVI.Cop$summary.fixed[, c("mean", "0.025quant", "0.975quant")]
+```    
+
+**NDVI**
+```{r echo= FALSE}
+model.INLA.NDVI.Cop$summary.fixed[, c("mean", "0.025quant", "0.975quant")]
+```  
+
+
+##### **Step 10**. Spatial confounding?
+
+**A.** Random Spatial Intercept
+```{r}
+w.proj <- inla.mesh.projector(mesh, loc =  Loc)
+
+w.pm_BNDVI   <- inla.mesh.project(w.proj, model.INLA.BNDVI.Cop$summary.random$w$mean)
+w.pm_ENDVI   <- inla.mesh.project(w.proj, model.INLA.ENDVI.Cop$summary.random$w$mean)
+w.pm_GIPVI   <- inla.mesh.project(w.proj, model.INLA.GIPVI.Cop$summary.random$w$mean)
+w.pm_GNDVI   <- inla.mesh.project(w.proj, model.INLA.GNDVI.Cop$summary.random$w$mean)
+w.pm_GRVI   <- inla.mesh.project(w.proj, model.INLA.GRVI.Cop$summary.random$w$mean)
+w.pm_GSAVI   <- inla.mesh.project(w.proj, model.INLA.GSAVI.Cop$summary.random$w$mean)
+w.pm_NDVI   <- inla.mesh.project(w.proj, model.INLA.NDVI.Cop$summary.random$w$mean)
+```
+
+**B.** Random Spatial Intercept vs VIs
+
+**BNDVI**
+```{r}
+SCbndvi <- inla (w.pm_BNDVI ~ scale(BNDVI),
+               family= "gaussian",
+                data = X,
+                   control.compute = list(dic = TRUE, waic = TRUE)
+                    )
+SCbndvi$summary.fixed[, c("mean", "0.025quant", "0.975quant")]
+```   
+
+**ENDVI**
+```{r echo= FALSE}
+SCendvi <- inla (w.pm_ENDVI ~ scale(ENDVI1) + scale(ENDVI2),
+               family= "gaussian",
+                data = X,
+                   control.compute = list(dic = TRUE, waic = TRUE)
+                    )
+SCendvi$summary.fixed[, c("mean", "0.025quant", "0.975quant")]
+```   
+
+**GIPVI**
+```{r echo= FALSE}
+SCgipvi <- inla (w.pm_GIPVI ~ scale(GIPVI),
+               family= "gaussian",
+                data = X,
+                   control.compute = list(dic = TRUE, waic = TRUE)
+                    )
+SCgipvi$summary.fixed[, c("mean", "0.025quant", "0.975quant")]
+```   
+
+**GNDVI**
+```{r echo= FALSE}
+SCgndvi <- inla (w.pm_GNDVI ~ scale(GNDVI),
+               family= "gaussian",
+                data = X,
+                   control.compute = list(dic = TRUE, waic = TRUE)
+                    )
+SCgndvi$summary.fixed[, c("mean", "0.025quant", "0.975quant")]
+```   
+
+**GRVI**
+```{r echo= FALSE}
+SCgrvi <- inla (w.pm_GRVI ~ scale(GRVI),
+               family= "gaussian",
+                data = X,
+                   control.compute = list(dic = TRUE, waic = TRUE)
+                    )
+SCgrvi$summary.fixed[, c("mean", "0.025quant", "0.975quant")]
+```    
+
+**NDVI**
+```{r echo= FALSE}
+SCndvi <- inla (w.pm_NDVI ~ scale(NDVI),
+               family= "gaussian",
+                data = X,
+                   control.compute = list(dic = TRUE, waic = TRUE)
+                    )
+SCndvi$summary.fixed[, c("mean", "0.025quant", "0.975quant")]
+``` 
+
+
+### **Step 6**. Formula; Restrictions Spatial Confounding
+
+```{r}
+Xm <- model.matrix(~ Year + Season + 
+                    RE_ndvi + poly(RE_ndvi,2) + RE_endvi + poly(RE_endvi,2) + RE_gdvi + 
+                     poly(RE_gdvi,2) + RE_gipvi + poly(RE_gipvi,2) + RE_gndvi + 
+                     poly(RE_gndvi,2) + RE_grvi + poly(RE_grvi,2) + RE_gsavi + poly(RE_gsavi,2) + 
+                    RE_bndvi + poly(RE_bndvi,2), data= Data)
+
+XBNDVI <- data.frame(Intercept= Xm[,1], Year2018= Xm[,2], Year2019= Xm[,3], SeasonSpring= Xm[,4], SeasonSummer= Xm[,5], SeasonWinter= Xm[,6],
+                    BNDVI = Xm[,28])
+XENDVI <- data.frame(Intercept= Xm[,1], Year2018= Xm[,2], Year2019= Xm[,3], SeasonSpring= Xm[,4], SeasonSummer= Xm[,5], SeasonWinter= Xm[,6],
+                    ENDVI = Xm[,10])
+XGIPVI <- data.frame(Intercept= Xm[,1], Year2018= Xm[,2], Year2019= Xm[,3], SeasonSpring= Xm[,4], SeasonSummer= Xm[,5], SeasonWinter= Xm[,6],
+                     GIPVI = Xm[,16])
+XGNDVI <- data.frame(Intercept= Xm[,1], Year2018= Xm[,2], Year2019= Xm[,3], SeasonSpring= Xm[,4], SeasonSummer= Xm[,5], SeasonWinter= Xm[,6],
+                     GNDVI = Xm[,19])
+XGRVI <- data.frame(Intercept= Xm[,1], Year2018= Xm[,2], Year2019= Xm[,3], SeasonSpring= Xm[,4], SeasonSummer= Xm[,5], SeasonWinter= Xm[,6],
+                     GRVI = Xm[,22])
+XGSAVI <- data.frame(Intercept= Xm[,1], Year2018= Xm[,2], Year2019= Xm[,3], SeasonSpring= Xm[,4], SeasonSummer= Xm[,5], SeasonWinter= Xm[,6],
+                    GSAVI = Xm[,25])
+
+n.covariates.poly= 8 # Intercept + Year(2) + Month (3) + poly VI (2)
+n.covariates= 7 # Intercept + Year(2) + Month (3) + linear VI (1)
+
+Qfact.BNDVI = qr.Q(qr(XBNDVI))
+Qfact.ENDVI = qr.Q(qr(XENDVI))
+Qfact.GIPVI = qr.Q(qr(XGIPVI))
+Qfact.GNDVI = qr.Q(qr(XGNDVI))
+Qfact.GRVI = qr.Q(qr(XGRVI))
+Qfact.GSAVI = qr.Q(qr(XGSAVI))
+
+```
+
+
+Formulas:
+```{r}
+f3.BNDVI <- y ~ -1 + Intercept + Year2018 + Year2019 + SeasonSpring + SeasonSummer + SeasonWinter + scale(BNDVI) +  
+  f(w, model = spde, extraconstr = list(A = as.matrix(t(Qfact.BNDVI)%*%A2), e= rep(0,n.covariates)))
+
+f3.ENDVI <- y ~ -1 + Intercept + Year2018 + Year2019 + SeasonSpring + SeasonSummer + SeasonWinter +  scale(ENDVI) + 
+  f(w, model = spde, extraconstr = list(A = as.matrix(t(Qfact.ENDVI)%*%A2), e= rep(0,n.covariates)))
+
+f3.GIPVI <- y ~ -1 + Intercept + Year2018 + Year2019 + SeasonSpring + SeasonSummer + SeasonWinter +  scale(GIPVI) + 
+  f(w, model = spde, extraconstr = list(A = as.matrix(t(Qfact.GIPVI)%*%A2), e= rep(0,n.covariates)))
+
+f3.GNDVI <- y ~ -1 + Intercept + Year2018 + Year2019 + SeasonSpring + SeasonSummer + SeasonWinter +  scale(GNDVI) +  +
+  f(w, model = spde, extraconstr = list(A = as.matrix(t(Qfact.GNDVI)%*%A2), e= rep(0,n.covariates)))
+
+f3.GRVI <- y ~ -1 + Intercept + Year2018 + Year2019 + SeasonSpring + SeasonSummer + SeasonWinter + scale(GRVI) + 
+  f(w, model = spde, extraconstr = list(A = as.matrix(t(Qfact.GRVI)%*%A2), e= rep(0,n.covariates)))
+
+f3.GSAVI <- y ~ -1 + Intercept + Year2018 + Year2019 + SeasonSpring + SeasonSummer + SeasonWinter +  scale(GSAVI) + 
+  f(w, model = spde, extraconstr = list(A = as.matrix(t(Qfact.GSAVI)%*%A2), e= rep(0,n.covariates)))
+```
+
+
+### **Step 7**. Run the model in INLA
+
+```{r}
+# BNDVI
+model.INLA.BNDVI.Cop_SC <- inla(f3.BNDVI,
+                   family = "gaussian", 
+                   data = inla.stack.data(All.stacks_Coprofagos),
+                   control.predictor = list(A = inla.stack.A(All.stacks_Coprofagos), compute= TRUE),
+                   control.compute = list(waic= TRUE, dic= TRUE)) # 
+
+# ENDVI
+model.INLA.ENDVI.Cop_SC <- inla(f3.ENDVI,
+                   family = "gaussian", 
+                   data = inla.stack.data(All.stacks_Coprofagos),
+                   control.predictor = list(A = inla.stack.A(All.stacks_Coprofagos), compute= TRUE),
+                   control.compute = list(waic= TRUE, dic= TRUE)) # 
+
+# GIPVI
+model.INLA.GIPVI.Cop_SC <- inla(f3.GIPVI,
+                   family = "gaussian", 
+                   data = inla.stack.data(All.stacks_Coprofagos),
+                   control.predictor = list(A = inla.stack.A(All.stacks_Coprofagos), compute= TRUE),
+                   control.compute = list(waic= TRUE, dic= TRUE)) # 
+
+# GNDVI
+model.INLA.GNDVI.Cop_SC <- inla(f3.GNDVI,
+                   family = "gaussian", 
+                   data = inla.stack.data(All.stacks_Coprofagos),
+                   control.predictor = list(A = inla.stack.A(All.stacks_Coprofagos), compute= TRUE),
+                   control.compute = list(waic= TRUE, dic= TRUE)) # 
+
+# GRVI
+model.INLA.GRVI.Cop_SC <- inla(f3.GRVI,
+                   family = "gaussian", 
+                   data = inla.stack.data(All.stacks_Coprofagos),
+                   control.predictor = list(A = inla.stack.A(All.stacks_Coprofagos), compute= TRUE),
+                   control.compute = list(waic= TRUE, dic= TRUE)) # 
+
+# GSAVI
+model.INLA.GSAVI.Cop_SC <- inla(f3.GSAVI,
+                   family = "gaussian", 
+                   data = inla.stack.data(All.stacks_Coprofagos),
+                   control.predictor = list(A = inla.stack.A(All.stacks_Coprofagos), compute= TRUE),
+                   control.compute = list(waic= TRUE, dic= TRUE)) # 
+
+```
+
+
+##### **Step 8**. Results
+
+**BNDVI**
+
+```{r}
+model.INLA.BNDVI.Cop_SC$summary.fixed[, c("mean", "0.025quant", "0.975quant")]
+```      
+
+```{r echo= FALSE}
+index.Cov <- inla.stack.index(All.stacks_Coprofagos,
+                              tag = "Covariates")$data
+
+Predichos <- model.INLA.BNDVI.Cop_SC$summary.fitted.values[index.Cov, c(1,3,5)]
+
+# Mean values
+Predicted.mean <- vector(length= 1000)
+Predicted.BCILow <- vector(length= 1000) 
+Predicted.BCIHigh <- vector(length= 1000)
+
+for(x in 1:1000){
+  items <- which(MyData$BNDVI == unique(MyData$BNDVI)[x])
+  Predicted.mean [x] <- mean(Predichos[items, 1])
+  Predicted.BCILow [x] <- mean(Predichos[items, 2])
+  Predicted.BCIHigh [x] <- mean(Predichos[items, 3])
+}
+
+# It is the second one we need as these are for the
+# artificial covariate values.
+# Add them to the MyData object.
+MyData1 <- data.frame (BNDVI= unique(MyData$BNDVI), Predicted.mean, Predicted.BCILow, Predicted.BCIHigh) 
+
+MyData1 <- rename(MyData1, 
+                  c("Predicted.mean" = "Predicted.meanlog", 
+                    "Predicted.BCILow" = "Predicted.BCILowlog",
+                    "Predicted.BCIHigh" = "Predicted.BCIHighlog"))
+MyData1$Predicted.mean <- 10^(MyData1$Predicted.meanlog) - 1
+MyData1$Predicted.BCIHigh <- 10^(MyData1$Predicted.BCIHighlog) -1
+MyData1$Predicted.BCILow <- 10^(MyData1$Predicted.BCILowlog) -1
+
+p.BNDVI <- ggplot(data=MyData1, aes(x=BNDVI, ymin = Predicted.BCILow, ymax = Predicted.BCIHigh,  y= Predicted.mean)) + 
+  geom_line(size= 1) + 
+  geom_ribbon(alpha=0.3)
+
+p.BNDVI <- p.BNDVI +  geom_jitter (aes (x=RE_bndvi, y = 10^(LogCOP_ALL)-1), data= Data, alpha= 0.6, inherit.aes = FALSE, size= 3, show.legend = FALSE) +
+  xlab("BNDVI") + 
+  ylab("Biommass of coprophagous arthropodos (mg)") + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_line(colour = "black"), 
+                                                axis.title.x = element_text(size = 12, margin = margin(t = 5, r = 0, b = 0, l = 0)),
+                                                axis.title.y = element_text(size = 12, margin = margin(t = 0, r = 10, b = 0, l = 0)), 
+                                                axis.text = element_text(size= 10), plot.margin = margin(0, 0, 0, 0))
+
+```  
+
+
+```{r echo= FALSE}
+p.BNDVI.log <- ggplot(data=MyData1, aes(x=BNDVI,  y= Predicted.meanlog)) + 
+  geom_line(size= 1.5) + 
+  geom_jitter (aes (x=RE_bndvi, y = LogCOP_ALL), data= Data, alpha= 0.4, inherit.aes = FALSE, size= 4, show.legend = FALSE)
+  
+p.BNDVI.log <- p.BNDVI.log + geom_ribbon(data=MyData1, aes(x=BNDVI, ymin = Predicted.BCILowlog, ymax = Predicted.BCIHighlog,  y= Predicted.meanlog), alpha=0.3)  +
+  xlab("BNDVI") + 
+  ylab("Log Coprophagous Biomass (mg)") + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_line(colour = "black", size= 1.5), 
+                                                axis.title.x = element_text(size = 31, margin = margin(t = 5, r = 0, b = 0, l = 0)),
+                                                axis.title.y = element_text(size = 31, margin = margin(t = 0, r = 10, b = 0, l = 0)), 
+                                                axis.text = element_text(size= 27), plot.margin = unit(c(0.5, 0.5, 1, 1), "cm"))
+
+```     
+
+**ENDVI**
+```{r echo= FALSE}
+model.INLA.ENDVI.Cop_SC$summary.fixed[, c("mean", "0.025quant", "0.975quant")]
+```  
+    
+```{r echo= FALSE}
+index.Cov <- inla.stack.index(All.stacks_Coprofagos,
+                              tag = "Covariates")$data
+
+Predichos <- model.INLA.ENDVI.Cop_SC$summary.fitted.values[index.Cov, c(1,3,5)]
+
+# Mean values
+Predicted.mean <- vector(length= 1000)
+Predicted.BCILow <- vector(length= 1000) 
+Predicted.BCIHigh <- vector(length= 1000)
+
+for(x in 1:1000){
+  items <- which(MyData$ENDVI == unique(MyData$ENDVI)[x])
+  Predicted.mean [x] <- mean(Predichos[items, 1])
+  Predicted.BCILow [x] <- mean(Predichos[items, 2])
+  Predicted.BCIHigh [x] <- mean(Predichos[items, 3])
+}
+
+# It is the second one we need as these are for the
+# artificial covariate values.
+# Add them to the MyData object.
+MyData1 <- data.frame (ENDVI= unique(MyData$ENDVI), Predicted.mean, Predicted.BCILow, Predicted.BCIHigh) 
+
+MyData1 <- rename(MyData1, 
+                  c("Predicted.mean" = "Predicted.meanlog", 
+                    "Predicted.BCILow" = "Predicted.BCILowlog",
+                    "Predicted.BCIHigh" = "Predicted.BCIHighlog"))
+MyData1$Predicted.mean <- 10^(MyData1$Predicted.meanlog) - 1
+MyData1$Predicted.BCIHigh <- 10^(MyData1$Predicted.BCIHighlog) -1
+MyData1$Predicted.BCILow <- 10^(MyData1$Predicted.BCILowlog) -1
+
+p.ENDVI <- ggplot(data=MyData1, aes(x=ENDVI, ymin = Predicted.BCILow, ymax = Predicted.BCIHigh,  y= Predicted.mean)) + 
+  geom_line(size= 1) + 
+  geom_ribbon(alpha=0.3)
+
+p.ENDVI <- p.ENDVI +  geom_jitter (aes (x=RE_endvi, y = 10^(LogCOP_ALL)-1), data= Data, alpha= 0.6, inherit.aes = FALSE, size= 3, show.legend = FALSE) +
+  xlab("ENDVI") + 
+  ylab("Biommass of coprophagous arthropodos (mg)") + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_line(colour = "black"), 
+                                                axis.title.x = element_text(size = 12, margin = margin(t = 5, r = 0, b = 0, l = 0)),
+                                                axis.title.y = element_text(size = 12, margin = margin(t = 0, r = 10, b = 0, l = 0)), 
+                                                axis.text = element_text(size= 10), plot.margin = margin(0, 0, 0, 0))
+
+```  
+
+
+```{r echo= FALSE}
+p.ENDVI.log <- ggplot(data=MyData1, aes(x=ENDVI, y= Predicted.meanlog)) + 
+  geom_line(size= 1.5) + 
+  geom_jitter (aes (x=RE_endvi, y = LogCOP_ALL), data= Data, alpha= 0.4, inherit.aes = FALSE, size= 4, show.legend = FALSE)
+  
+
+p.ENDVI.log <- p.ENDVI.log + geom_ribbon(data=MyData1, aes(x=ENDVI, ymin = Predicted.BCILowlog, ymax = Predicted.BCIHighlog,  y= Predicted.meanlog), alpha=0.3)  +
+  xlab("ENDVI") + 
+  ylab("") + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_line(colour = "black", size= 1.5), 
+                                                axis.title.x = element_text(size = 31, margin = margin(t = 5, r = 0, b = 0, l = 0)),
+                                                axis.title.y = element_text(size = 31, margin = margin(t = 0, r = 10, b = 0, l = 0)), 
+                                                axis.text = element_text(size= 27), plot.margin = unit(c(0.5, 0.8, 1, 1), "cm"))
+
+```   
+
+
+**GIPVI**
+```{r echo= FALSE}
+model.INLA.GIPVI.Cop_SC$summary.fixed[, c("mean", "0.025quant", "0.975quant")]
+```     
+
+```{r echo= FALSE}
+index.Cov <- inla.stack.index(All.stacks_Coprofagos,
+                              tag = "Covariates")$data
+
+Predichos <- model.INLA.GIPVI.Cop_SC$summary.fitted.values[index.Cov, c(1,3,5)]
+
+# Mean values
+Predicted.mean <- vector(length= 1000)
+Predicted.BCILow <- vector(length= 1000) 
+Predicted.BCIHigh <- vector(length= 1000)
+
+for(x in 1:1000){
+  items <- which(MyData$GIPVI == unique(MyData$GIPVI)[x])
+  Predicted.mean [x] <- mean(Predichos[items, 1])
+  Predicted.BCILow [x] <- mean(Predichos[items, 2])
+  Predicted.BCIHigh [x] <- mean(Predichos[items, 3])
+}
+
+# It is the second one we need as these are for the
+# artificial covariate values.
+# Add them to the MyData object.
+MyData1 <- data.frame (GIPVI= unique(MyData$GIPVI), Predicted.mean, Predicted.BCILow, Predicted.BCIHigh) 
+
+MyData1 <- rename(MyData1, 
+                  c("Predicted.mean" = "Predicted.meanlog", 
+                    "Predicted.BCILow" = "Predicted.BCILowlog",
+                    "Predicted.BCIHigh" = "Predicted.BCIHighlog"))
+MyData1$Predicted.mean <- 10^(MyData1$Predicted.meanlog) - 1
+MyData1$Predicted.BCIHigh <- 10^(MyData1$Predicted.BCIHighlog) -1
+MyData1$Predicted.BCILow <- 10^(MyData1$Predicted.BCILowlog) -1
+
+p.GIPVI <- ggplot(data=MyData1, aes(x=GIPVI, ymin = Predicted.BCILow, ymax = Predicted.BCIHigh,  y= Predicted.mean)) + 
+  geom_line(size= 1) + 
+  geom_ribbon(alpha=0.3)
+
+p.GIPVI <- p.GIPVI +  geom_jitter (aes (x= RE_gipvi, y = 10^(LogCOP_ALL)-1), data= Data, alpha= 0.6, inherit.aes = FALSE, size= 3, show.legend = FALSE) +
+  xlab("GIPVI") + 
+  ylab("Biommass of coprophagous arthropodos (mg)") + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_line(colour = "black"), 
+                                                axis.title.x = element_text(size = 12, margin = margin(t = 5, r = 0, b = 0, l = 0)),
+                                                axis.title.y = element_text(size = 12, margin = margin(t = 0, r = 10, b = 0, l = 0)), 
+                                                axis.text = element_text(size= 10), plot.margin = margin(0, 0, 0, 0))
+
+```  
+
+
+```{r echo= FALSE}
+p.GIPVI.log <- ggplot(data=MyData1, aes(x=GIPVI, y= Predicted.meanlog)) + 
+  geom_line(size= 1.5) + 
+  geom_jitter (aes (x= RE_gipvi, y = LogCOP_ALL), data= Data, alpha= 0.4, inherit.aes = FALSE, size= 4, show.legend = FALSE)
+ 
+
+p.GIPVI.log <- p.GIPVI.log +  geom_ribbon(data=MyData1, aes(x=GIPVI, ymin = Predicted.BCILowlog, ymax = Predicted.BCIHighlog,  y= Predicted.meanlog), alpha=0.3)  +
+  xlab("GIPVI") + 
+  ylab("") + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_line(colour = "black", size= 1.5), 
+                                                axis.title.x = element_text(size = 31, margin = margin(t = 5, r = 0, b = 0, l = 0)),
+                                                axis.title.y = element_text(size = 31, margin = margin(t = 0, r = 10, b = 0, l = 0)), 
+                                                axis.text = element_text(size= 27), plot.margin = unit(c(0.5, 0.5, 1, 1), "cm"))
+
+```     
+
+**GNDVI**
+```{r echo= FALSE}
+model.INLA.GNDVI.Cop_SC$summary.fixed[, c("mean", "0.025quant", "0.975quant")]
+```     
+
+```{r echo= FALSE}
+index.Cov <- inla.stack.index(All.stacks_Coprofagos,
+                              tag = "Covariates")$data
+
+Predichos <- model.INLA.GNDVI.Cop_SC$summary.fitted.values[index.Cov, c(1,3,5)]
+
+# Mean values
+Predicted.mean <- vector(length= 1000)
+Predicted.BCILow <- vector(length= 1000) 
+Predicted.BCIHigh <- vector(length= 1000)
+
+for(x in 1:1000){
+  items <- which(MyData$GNDVI == unique(MyData$GNDVI)[x])
+  Predicted.mean [x] <- mean(Predichos[items, 1])
+  Predicted.BCILow [x] <- mean(Predichos[items, 2])
+  Predicted.BCIHigh [x] <- mean(Predichos[items, 3])
+}
+
+# It is the second one we need as these are for the
+# artificial covariate values.
+# Add them to the MyData object.
+MyData1 <- data.frame (GNDVI= unique(MyData$GNDVI), Predicted.mean, Predicted.BCILow, Predicted.BCIHigh) 
+
+MyData1 <- rename(MyData1, 
+                  c("Predicted.mean" = "Predicted.meanlog", 
+                    "Predicted.BCILow" = "Predicted.BCILowlog",
+                    "Predicted.BCIHigh" = "Predicted.BCIHighlog"))
+MyData1$Predicted.mean <- 10^(MyData1$Predicted.meanlog) - 1
+MyData1$Predicted.BCIHigh <- 10^(MyData1$Predicted.BCIHighlog) -1
+MyData1$Predicted.BCILow <- 10^(MyData1$Predicted.BCILowlog) -1
+
+p.GNDVI <- ggplot(data=MyData1, aes(x=GNDVI, ymin = Predicted.BCILow, ymax = Predicted.BCIHigh,  y= Predicted.mean)) + 
+  geom_line(size= 1) + 
+  geom_ribbon(alpha=0.3)
+
+p.GNDVI <- p.GNDVI +  geom_jitter (aes (x= RE_gndvi, y = 10^(LogCOP_ALL)-1), data= Data, alpha= 0.6, inherit.aes = FALSE, size= 3, show.legend = FALSE) +
+  xlab("GNDVI") + 
+  ylab("Biommass of coprophagous arthropodos (mg)") + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_line(colour = "black"), 
+                                                axis.title.x = element_text(size = 12, margin = margin(t = 5, r = 0, b = 0, l = 0)),
+                                                axis.title.y = element_text(size = 12, margin = margin(t = 0, r = 10, b = 0, l = 0)), 
+                                                axis.text = element_text(size= 10), plot.margin = margin(0, 0, 0, 0))
+
+```  
+
+
+```{r echo= FALSE}
+p.GNDVI.log <- ggplot(data=MyData1, aes(x=GNDVI, y= Predicted.meanlog)) + 
+  geom_line(size= 1.5) + 
+  geom_jitter (aes (x= RE_gndvi, y = LogCOP_ALL), data= Data, alpha= 0.4, inherit.aes = FALSE, size= 4, show.legend = FALSE)
+  
+
+p.GNDVI.log <- p.GNDVI.log + geom_ribbon(data=MyData1, aes(x=GNDVI, ymin = Predicted.BCILowlog, ymax = Predicted.BCIHighlog,  y= Predicted.meanlog), alpha=0.3)  +
+  xlab("GNDVI") + 
+  ylab("Log Coprophagous Biomass (mg)") + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_line(colour = "black", size= 1.5), 
+                                                axis.title.x = element_text(size = 31, margin = margin(t = 5, r = 0, b = 0, l = 0)),
+                                                axis.title.y = element_text(size = 31, margin = margin(t = 0, r = 10, b = 0, l = 0)), 
+                                                axis.text = element_text(size= 27), plot.margin = unit(c(0.5, 0.5, 1, 1), "cm"))
+
+```   
+
+**GRVI**
+```{r echo= FALSE}
+model.INLA.GRVI.Cop_SC$summary.fixed[, c("mean", "0.025quant", "0.975quant")]
+```    
+
+```{r echo= FALSE}
+index.Cov <- inla.stack.index(All.stacks_Coprofagos,
+                              tag = "Covariates")$data
+
+Predichos <- model.INLA.GRVI.Cop_SC$summary.fitted.values[index.Cov, c(1,3,5)]
+
+# Mean values
+Predicted.mean <- vector(length= 1000)
+Predicted.BCILow <- vector(length= 1000) 
+Predicted.BCIHigh <- vector(length= 1000)
+
+for(x in 1:1000){
+  items <- which(MyData$GRVI == unique(MyData$GRVI)[x])
+  Predicted.mean [x] <- mean(Predichos[items, 1])
+  Predicted.BCILow [x] <- mean(Predichos[items, 2])
+  Predicted.BCIHigh [x] <- mean(Predichos[items, 3])
+}
+
+# It is the second one we need as these are for the
+# artificial covariate values.
+# Add them to the MyData object.
+MyData1 <- data.frame (GRVI= unique(MyData$GRVI), Predicted.mean, Predicted.BCILow, Predicted.BCIHigh) 
+
+MyData1 <- rename(MyData1, 
+                  c("Predicted.mean" = "Predicted.meanlog", 
+                    "Predicted.BCILow" = "Predicted.BCILowlog",
+                    "Predicted.BCIHigh" = "Predicted.BCIHighlog"))
+MyData1$Predicted.mean <- 10^(MyData1$Predicted.meanlog) - 1
+MyData1$Predicted.BCIHigh <- 10^(MyData1$Predicted.BCIHighlog) -1
+MyData1$Predicted.BCILow <- 10^(MyData1$Predicted.BCILowlog) -1
+
+p.GRVI <- ggplot(data=MyData1, aes(x=GRVI, ymin = Predicted.BCILow, ymax = Predicted.BCIHigh,  y= Predicted.mean)) + 
+  geom_line(size= 1) + 
+  geom_ribbon(alpha=0.3)
+
+p.GRVI <- p.GRVI +  geom_jitter (aes (x= RE_grvi, y = 10^(LogCOP_ALL)-1), data= Data, alpha= 0.6, inherit.aes = FALSE, size= 3, show.legend = FALSE) +
+  xlab("GRVI") + 
+  ylab("Biommass of coprophagous arthropodos (mg)") + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_line(colour = "black"), 
+                                                axis.title.x = element_text(size = 12, margin = margin(t = 5, r = 0, b = 0, l = 0)),
+                                                axis.title.y = element_text(size = 12, margin = margin(t = 0, r = 10, b = 0, l = 0)), 
+                                                axis.text = element_text(size= 10), plot.margin = margin(0, 0, 0, 0))
+
+```  
+
+
+```{r echo= FALSE}
+p.GRVI.log <- ggplot(data=MyData1, aes(x=GRVI, y= Predicted.meanlog)) + 
+  geom_line(size= 1.5) + 
+   geom_jitter (aes (x= RE_grvi, y = LogCOP_ALL), data= Data, alpha= 0.4, inherit.aes = FALSE, size= 4, show.legend = FALSE) 
+ 
+
+p.GRVI.log <- p.GRVI.log +  geom_ribbon(data=MyData1, aes(x=GRVI, ymin = Predicted.BCILowlog, ymax = Predicted.BCIHighlog,  y= Predicted.meanlog), alpha=0.3) +
+  xlab("GRVI") + 
+  ylab("") + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_line(colour = "black", size= 1.5), 
+                                                axis.title.x = element_text(size = 31, margin = margin(t = 5, r = 0, b = 0, l = 0)),
+                                                axis.title.y = element_text(size = 31, margin = margin(t = 0, r = 10, b = 0, l = 0)), 
+                                                axis.text = element_text(size= 27), plot.margin = unit(c(0.5, 0.5, 1, 1), "cm"))
+
+```  
+
+**GSAVI**
+```{r echo= FALSE}
+model.INLA.GSAVI.Cop_SC$summary.fixed[, c("mean", "0.025quant", "0.975quant")]
+```  
+
+
+```{r echo= FALSE}
+index.Cov <- inla.stack.index(All.stacks_Coprofagos,
+                              tag = "Covariates")$data
+
+Predichos <- model.INLA.GSAVI.Cop_SC$summary.fitted.values[index.Cov, c(1,3,5)]
+
+# Mean values
+Predicted.mean <- vector(length= 1000)
+Predicted.BCILow <- vector(length= 1000) 
+Predicted.BCIHigh <- vector(length= 1000)
+
+for(x in 1:1000){
+  items <- which(MyData$GSAVI == unique(MyData$GSAVI)[x])
+  Predicted.mean [x] <- mean(Predichos[items, 1])
+  Predicted.BCILow [x] <- mean(Predichos[items, 2])
+  Predicted.BCIHigh [x] <- mean(Predichos[items, 3])
+}
+
+# It is the second one we need as these are for the
+# artificial covariate values.
+# Add them to the MyData object.
+MyData1 <- data.frame (GSAVI= unique(MyData$GSAVI), Predicted.mean, Predicted.BCILow, Predicted.BCIHigh) 
+
+MyData1 <- rename(MyData1, 
+                  c("Predicted.mean" = "Predicted.meanlog", 
+                    "Predicted.BCILow" = "Predicted.BCILowlog",
+                    "Predicted.BCIHigh" = "Predicted.BCIHighlog"))
+MyData1$Predicted.mean <- 10^(MyData1$Predicted.meanlog) - 1
+MyData1$Predicted.BCIHigh <- 10^(MyData1$Predicted.BCIHighlog) -1
+MyData1$Predicted.BCILow <- 10^(MyData1$Predicted.BCILowlog) -1
+
+p.GSAVI <- ggplot(data=MyData1, aes(x= GSAVI, ymin = Predicted.BCILow, ymax = Predicted.BCIHigh,  y= Predicted.mean)) + 
+  geom_line(size= 1) + 
+  geom_ribbon(alpha=0.3)
+
+p.GSAVI <- p.GSAVI +  geom_jitter (aes (x=RE_gsavi, y = 10^(LogCOP_ALL)-1), data= Data, alpha= 0.6, inherit.aes = FALSE, size= 3, show.legend = FALSE) +
+  xlab("GSAVI") + 
+  ylab("Biommass of coprophagous arthropodos (mg)") + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_line(colour = "black"), 
+                                                axis.title.x = element_text(size = 12, margin = margin(t = 5, r = 0, b = 0, l = 0)),
+                                                axis.title.y = element_text(size = 12, margin = margin(t = 0, r = 10, b = 0, l = 0)), 
+                                                axis.text = element_text(size= 10), plot.margin = margin(0, 0, 0, 0))
+
+```  
+
+
+```{r echo= FALSE}
+p.GSAVI.log <- ggplot(data=MyData1, aes(x=GSAVI, y= Predicted.meanlog)) + 
+  geom_line(size= 1.5) + 
+  geom_jitter (aes (x=RE_gsavi, y = LogCOP_ALL), data= Data, alpha= 0.4, inherit.aes = FALSE, size= 4, show.legend = FALSE)
+  
+
+p.GSAVI.log <- p.GSAVI.log + geom_ribbon(data=MyData1, aes(x=GSAVI, ymin = Predicted.BCILowlog, ymax = Predicted.BCIHighlog,  y= Predicted.meanlog), alpha=0.3)  +
+  xlab("GSAVI") + 
+  ylab("") + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_line(colour = "black", size= 1.5), 
+                                                axis.title.x = element_text(size = 31, margin = margin(t = 5, r = 0, b = 0, l = 0)),
+                                                axis.title.y = element_text(size = 31, margin = margin(t = 0, r = 10, b = 0, l = 0)), 
+                                                axis.text = element_text(size= 27), plot.margin = unit(c(0.5, 0.5, 1, 1), "cm"))
+
+```    
+
+##### **Step 9**. Plot results   
+
+```{r, fig.width= 26, fig.height= 15.25}
+# create an apporpriate viewport.  Modify the dimensions and coordinates as needed
+plot_grid(p.BNDVI.log, p.ENDVI.log, p.GIPVI.log,
+          p.GNDVI.log, p.GRVI.log, p.GSAVI.log,
+          lables= c("A", "B", "C", "D", "E", "F", "G"),
+          nrow= 2, ncol= 3)
+```
+
+Natural:
+```{r, fig.width= 10, fig.height= 15, warning= FALSE}
+# create an apporpriate viewport.  Modify the dimensions and coordinates as needed
+plot_grid(p.BNDVI, p.ENDVI, p.GIPVI,
+          p.GNDVI, p.GRVI, p.GSAVI,
+          lables= c("A", "B", "C", "D", "E", "F"),
+          nrow= 4, ncol= 2)
+```
+
+
